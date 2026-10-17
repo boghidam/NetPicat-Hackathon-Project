@@ -2,33 +2,48 @@
 
 from __future__ import annotations
 
+import math
 import random
 
 from .config import Config
 from .congestion import CongestionEstimator
 from .controller import IntersectionController, NetworkCoordinator
+from .data import build_city
+from .detection import DetectionLoops
 from .events import EventLog
 from .mock_api import BusFleet, TelemetryBus
-from .network import CityGrid
+from .network import RoadNetwork
 from .predictor import PostIntersectionPredictor
 from .traffic_model import TrafficModel
 
 
 class Simulation:
-    def __init__(self, cfg: Config | None = None, adaptive: bool = True, incident_at: float | None = None):
+    def __init__(
+        self,
+        cfg: Config | None = None,
+        adaptive: bool = True,
+        incident_at: float | None = None,
+        net: RoadNetwork | None = None,
+        map_name: str = "iasi",
+    ):
         self.cfg = cfg = cfg or Config()
         rng = random.Random(cfg.seed)
         self.t = 0.0
-        self.grid = CityGrid(cfg)
+        self.net = net or build_city(map_name, cfg)
         self.events = EventLog()
-        self.model = TrafficModel(self.grid, cfg, rng)
+        self.model = TrafficModel(self.net, cfg, rng)
         self.api = TelemetryBus()
-        self.fleet = BusFleet(self.grid, cfg, rng, self.model, self.api)
-        self.estimator = CongestionEstimator(self.grid, cfg)
-        self.predictor = PostIntersectionPredictor(self.grid, cfg, self.events)
-        self.coord = NetworkCoordinator(self.grid, cfg, self.estimator, self.predictor, self.events, adaptive)
+        self.fleet = BusFleet(self.net, cfg, rng, self.model, self.api)
+        self.estimator = CongestionEstimator(self.net, cfg)
+        self.predictor = PostIntersectionPredictor(self.net, cfg, self.events)
+        self.loops = DetectionLoops(self.net, cfg)
+        self.coord = NetworkCoordinator(
+            self.net, cfg, self.estimator, self.predictor, self.loops, self.events, adaptive
+        )
         self.controllers = {
-            n.id: IntersectionController(n.id, self.grid, cfg, self.coord, self.events) for n in self.grid.nodes
+            n.id: IntersectionController(n.id, self.net, cfg, self.coord, self.events)
+            for n in self.net.nodes
+            if n.signalised
         }
         self.coord.controllers = self.controllers
         # Consumers see only the API stream, exactly as a real deployment would.
@@ -37,13 +52,28 @@ class Simulation:
         self.api.subscribe(self.coord.observe)
 
         self.incident_at = incident_at
-        self.incident_segment = self.grid.segment_between(5, 6)  # central eastbound link
+        self.incident_segment = self._pick_incident_segment()
         self.incident_started = False
         self._since_refresh = cfg.decision_period  # force an initial refresh
         # metrics
         self.slow_ema = 0.0  # recent mean fraction of time buses lose to delay
         self.peak_density = 0.0
         self.coord.refresh(0.0)
+
+    def _pick_incident_segment(self) -> int:
+        """A long edge on the busiest bus corridor, close to the middle of the map."""
+        net = self.net
+        lines_on = [0] * len(net.segments)
+        for line in net.routes:
+            for s in set(line.edges):
+                lines_on[s] += 1
+        cx, cy = (net.bounds[0] + net.bounds[2]) / 2, (net.bounds[1] + net.bounds[3]) / 2
+
+        def key(s) -> tuple[int, float]:
+            x, y, _, _ = net.point_at(s.id, s.length / 2)
+            return lines_on[s.id], -math.hypot(x - cx, y - cy)
+
+        return max((s for s in net.segments if s.length >= 120), key=key, default=net.segments[0]).id
 
     # -- control surface -----------------------------------------------------
     @property
@@ -58,11 +88,12 @@ class Simulation:
         sid = self.incident_segment if segment_id is None else segment_id
         self.model.start_incident(sid, self.t)
         self.incident_started = True
-        seg = self.grid.segments[sid]
+        seg = self.net.segments[sid]
+        where = seg.name or f"edge {sid}"
         self.events.add(
             self.t,
             "INCIDENT",
-            f"lane blocked on seg{sid} (n{seg.from_node}->n{seg.to_node}) for {self.cfg.incident_duration:.0f}s",
+            f"vehicle stalled on {where} (n{seg.from_node}->n{seg.to_node}) for {self.cfg.incident_duration:.0f}s",
             node=seg.to_node,
         )
 
@@ -79,12 +110,13 @@ class Simulation:
         if self._since_refresh >= cfg.decision_period:
             self._since_refresh = 0.0
             self.coord.refresh(self.t)
-            roads = [s.id for s in self.grid.segments if s.kind == "road"]
-            self.peak_density = max(self.peak_density, max(self.model.density(i) for i in roads))
+            self.peak_density = max(self.peak_density, max(self.model.density(s.id) for s in self.net.segments))
         self.t += dt
         buses = self.fleet.buses
-        mean_slow = sum(1.0 - min(1.0, b.v / cfg.free_speed) for b in buses) / len(buses)
-        self.slow_ema += (mean_slow - self.slow_ema) * dt / 60.0
+        if buses:
+            segs = self.net.segments
+            mean_slow = sum(1.0 - min(1.0, b.v / segs[b.seg].speed_limit) for b in buses) / len(buses)
+            self.slow_ema += (mean_slow - self.slow_ema) * dt / 60.0
 
     def run(self, seconds: float) -> None:
         for _ in range(int(round(seconds / self.cfg.dt))):

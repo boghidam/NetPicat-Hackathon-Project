@@ -1,12 +1,18 @@
 """Ground-truth microscopic traffic: individual cars and buses on one-lane roads.
 
 Controllers never read this directly. They only see what the buses report, so the buses
-really are the sensors. The world enforces the physical rules:
+really are the sensors. The world enforces the physical rules (SUMO-style, in plain Python):
 
-* a vehicle may not pass the stop line while its light is red, nor on yellow if it can
-  stop comfortably, and it never enters the junction box unless there is room to leave it;
-* vehicles follow the one ahead at a safe distance and cannot overtake;
+* a vehicle may not pass the stop line while its light is red, nor on yellow if it can still
+  stop, and it never enters the junction box unless there is room to leave it;
+* vehicles follow the one ahead at a safe distance along the edge polyline and cannot overtake,
+  so they never overlap and never jump across nodes;
+* left turns yield to oncoming traffic that shares their phase, and two streams merging into the
+  same edge take turns;
 * a throttled approach (see the coordinator) releases cars at a reduced rate.
+
+Every vehicle follows a route: buses loop forever along their line, cars follow a gate-to-gate
+fastest path.
 """
 
 from __future__ import annotations
@@ -17,7 +23,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
 from .config import Config
-from .network import CityGrid, Segment
+from .network import RoadNetwork, Segment
 
 INF = math.inf
 
@@ -30,32 +36,34 @@ class Vehicle:
     pos: float  # m from the segment start to the vehicle's front bumper
     v: float
     length: float
-    vfree: float
-    next_seg: int | None = None  # segment taken after the intersection ahead
-    goal: int | None = None  # cars: exit segment they are heading for
-    route: list[int] | None = None  # buses: cyclic list of segment ids
-    leg: int = 0
+    speed_factor: float  # desired speed as a share of the segment's speed limit
+    route: list[int] | None = None  # segment ids to follow
+    cyclic: bool = False  # buses repeat their route
+    leg: int = 0  # index of the current segment in the route
+    next_seg: int | None = None  # segment taken after the intersection ahead (None: leaves the map)
+    line: str | None = None  # buses: public line number
     delay: float = 0.0  # seconds beyond the free-flow schedule
     elapsed: float = 0.0
     laps: int = 0
 
 
 class TrafficModel:
-    def __init__(self, grid: CityGrid, cfg: Config, rng: random.Random):
-        self.grid, self.cfg, self.rng = grid, cfg, rng
-        self.lanes: list[list[Vehicle]] = [[] for _ in grid.segments]  # front vehicle first
+    def __init__(self, net: RoadNetwork, cfg: Config, rng: random.Random):
+        self.net, self.cfg, self.rng = net, cfg, rng
+        self.lanes: list[list[Vehicle]] = [[] for _ in net.segments]  # front vehicle first
         self.buses: list[Vehicle] = []
         self.incidents: dict[int, tuple[Vehicle, float]] = {}  # segment -> (blocker, expiry)
-        self.backlog = {sid: 0 for sid in grid.entries}  # cars waiting outside a gate
-        self.next_release = [0.0] * len(grid.segments)
+        self.backlog = {g: 0 for g in net.gates}  # cars waiting outside a gate
+        self.next_release = [0.0] * len(net.segments)
         self.exited = 0
         self.dropped = 0
-        self.car_speed_ratio = 1.0  # EMA of car speed / free speed
+        self.car_speed_ratio = 1.0  # EMA of car speed / speed limit
         self._ids = 0
         self._release_factor: Callable[[int], float] = lambda s: 1.0
         self._signal_state: Callable[[int], str] = lambda s: "G"
-        # vehicles that have passed a stop line and are crossing the box: target link -> {vehicle id: source link}
+        # vehicles that have passed a stop line and are crossing the box: target edge -> {vehicle id: source edge}
         self.in_box: dict[int, dict[str, int]] = {}
+        self._kind_cache: dict[tuple[int, int], str] = {}
         self._seed_cars()
 
     # -- creation ------------------------------------------------------------
@@ -74,47 +82,47 @@ class TrafficModel:
             i += 1
         lane.insert(i, v)
 
-    def _make_car(self, seg_id: int, pos: float, speed: float) -> Vehicle:
+    @staticmethod
+    def _next_on_route(v: Vehicle) -> int | None:
+        assert v.route is not None
+        if v.cyclic:
+            return v.route[(v.leg + 1) % len(v.route)]
+        return v.route[v.leg + 1] if v.leg + 1 < len(v.route) else None
+
+    def _make_car(self, route: list[int], leg: int, pos: float, speed: float) -> Vehicle:
         cfg = self.cfg
-        entry_node = self.grid.segments[seg_id].to_node
-        exits = [e for e in self.grid.exits if self.grid.segments[e].from_node != entry_node]
-        goal = self.rng.choice(exits)
-        v = Vehicle(
-            self._new_id("C"),
-            "car",
-            seg_id,
-            pos,
-            speed,
-            cfg.car_length,
-            cfg.free_speed * (1 + self.rng.uniform(-cfg.car_speed_var, cfg.car_speed_var)),
-            goal=goal,
-        )
-        v.next_seg = self.grid.choose_next(seg_id, goal, self.rng, cfg.route_follow)
-        return v
+        factor = 1.0 + self.rng.uniform(-cfg.car_speed_var, cfg.car_speed_var)
+        car = Vehicle(self._new_id("C"), "car", route[leg], pos, speed, cfg.car_length, factor, route=route, leg=leg)
+        car.next_seg = self._next_on_route(car)
+        return car
 
     def _seed_cars(self) -> None:
-        roads = [s for s in self.grid.segments if s.kind in ("road", "entry")]
+        if not self.net.gates:
+            return
         placed = 0
         for _ in range(self.cfg.initial_cars * 6):
             if placed >= self.cfg.initial_cars:
                 break
-            seg = self.rng.choice(roads)
-            pos = self.rng.uniform(10.0, seg.stop_pos - 6.0)
+            route = self.net.random_trip(self.rng)
+            leg = self.rng.randrange(len(route))
+            seg = self.net.segments[route[leg]]
+            pos = self.rng.uniform(5.0, max(6.0, seg.stop_pos - 4.0))
             if self._free_at(seg.id, pos, self.cfg.car_length):
-                car = self._make_car(seg.id, pos, 0.6 * self.cfg.free_speed)
+                car = self._make_car(route, leg, pos, 0.6 * seg.speed_limit)
                 self._insert(self.lanes[seg.id], car)
                 placed += 1
 
-    def add_bus(self, bus_id: str, route: list[int], leg: int, pos: float) -> Vehicle:
+    def add_bus(self, bus_id: str, line: str, route: list[int], leg: int, pos: float) -> Vehicle:
         """Place a bus on its route, sliding it back if the spot is taken."""
-        seg = self.grid.segments[route[leg]]
-        pos = min(pos, seg.stop_pos - 6.0)
+        seg = self.net.segments[route[leg]]
+        pos = min(pos, max(0.0, seg.stop_pos - 6.0))
         while pos > 0 and not self._free_at(seg.id, pos, self.cfg.bus_length):
             pos -= 6.0
         bus = Vehicle(
-            bus_id, "bus", seg.id, max(pos, 0.0), 0.5 * self.cfg.free_speed, self.cfg.bus_length, self.cfg.free_speed,
-            route=route, leg=leg, next_seg=route[(leg + 1) % len(route)],
+            bus_id, "bus", seg.id, max(pos, 0.0), 0.5 * seg.speed_limit, self.cfg.bus_length, 1.0,
+            route=route, cyclic=True, leg=leg, line=line,
         )  # fmt: skip
+        bus.next_seg = self._next_on_route(bus)
         self._insert(self.lanes[seg.id], bus)
         self.buses.append(bus)
         return bus
@@ -125,14 +133,13 @@ class TrafficModel:
             yield from lane
 
     def density(self, seg_id: int) -> float:
-        """Fraction of the link's length occupied by vehicles plus standstill gaps, 0..1."""
+        """Fraction of the edge's length occupied by vehicles plus standstill gaps, 0..1."""
         gap = self.cfg.min_gap
         used = sum(v.length + gap for v in self.lanes[seg_id])
-        return min(1.0, used / self.grid.segments[seg_id].length)
+        return min(1.0, used / self.net.segments[seg_id].length)
 
     def mean_density(self) -> float:
-        roads = [s.id for s in self.grid.segments if s.kind == "road"]
-        return sum(self.density(i) for i in roads) / len(roads)
+        return sum(self.density(s.id) for s in self.net.segments) / len(self.net.segments)
 
     @property
     def n_cars(self) -> int:
@@ -144,10 +151,10 @@ class TrafficModel:
 
     # -- incidents ----------------------------------------------------------
     def start_incident(self, seg_id: int, now: float) -> None:
-        """A vehicle stalls mid-link. Nobody can overtake on a one-lane road, so the lane is blocked."""
+        """A vehicle stalls mid-edge. Nobody can overtake on a one-lane road, so the lane is blocked."""
         if seg_id in self.incidents:
             return
-        seg = self.grid.segments[seg_id]
+        seg = self.net.segments[seg_id]
         blocker = Vehicle(self._new_id("X"), "blocker", seg_id, 0.5 * seg.stop_pos, 0.0, self.cfg.car_length, 0.0)
         lane = self.lanes[seg_id]
         for _ in range(40):  # slide behind any vehicle that is sitting on the chosen spot
@@ -185,29 +192,30 @@ class TrafficModel:
         accel, hard, comfort, gap = cfg.accel, cfg.max_brake, cfg.comfort_brake, cfg.min_gap
         crossings: list[tuple[Segment, Vehicle]] = []
         ratio_sum, ratio_n = 0.0, 0
-        for seg in self.grid.segments:
+        for seg in self.net.segments:
             lane = self.lanes[seg.id]
             if not lane:
                 continue
-            stop, length = seg.stop_pos, seg.length
-            state = signal_state(seg.id) if seg.signalised else "G"
+            stop, length, limit_speed = seg.stop_pos, seg.length, seg.speed_limit
+            state = signal_state(seg.id)
             prev: Vehicle | None = None
             for v in lane:
                 if v.kind == "blocker":
                     prev = v
                     continue
+                vfree = limit_speed * v.speed_factor
                 limit = INF if prev is None else prev.pos - prev.length - gap
-                if seg.signalised and v.pos < stop and (prev is None or prev.pos >= stop):
+                if v.pos < stop and (prev is None or prev.pos >= stop):
                     if self._line_closed(v, seg, state, now):
                         limit = min(limit, stop - 0.3)
                 room = max(0.0, limit - v.pos)
-                v_des = v.vfree if room == INF else min(v.vfree, math.sqrt(2 * comfort * room))
+                v_des = vfree if room == INF else min(vfree, math.sqrt(2 * comfort * room))
                 v.v = max(0.0, v.v + max(-hard * dt, min(accel * dt, v_des - v.v)))
                 new = v.pos + v.v * dt
                 if new > limit:
                     new = max(v.pos, limit)
                     v.v = (new - v.pos) / dt
-                if seg.signalised and v.pos < stop <= new:
+                if v.pos < stop <= new:
                     if v.next_seg is not None:
                         self.in_box.setdefault(v.next_seg, {})[v.id] = seg.id
                     if v.kind == "car":
@@ -216,9 +224,9 @@ class TrafficModel:
                 v.pos = new
                 v.elapsed += dt
                 if v.kind == "bus":
-                    v.delay += dt * (1.0 - min(1.0, v.v / cfg.free_speed))
+                    v.delay += dt * (1.0 - min(1.0, v.v / limit_speed))
                 else:
-                    ratio_sum += min(1.0, v.v / v.vfree)
+                    ratio_sum += min(1.0, v.v / limit_speed)
                     ratio_n += 1
                 prev = v
             while lane and lane[0].pos >= length:
@@ -235,12 +243,11 @@ class TrafficModel:
             return True
         dist = seg.stop_pos - v.pos
         brake_dist = v.v * v.v / (2 * self.cfg.comfort_brake)
-        left = self._turns_left(v, seg)
         if state == "Y" and v.v * v.v / (2 * self.cfg.max_brake) <= dist:
             return True  # can still stop, so it must; only vehicles too fast to stop run the yellow
         if not self._can_enter(v):
             return True  # never enter the box without room to leave it
-        if left and self._oncoming_conflict(seg):
+        if self._turns_left(v, seg) and self._oncoming_conflict(seg):
             return True  # yield to oncoming traffic, which is green at the same time
         if v.kind == "car":
             g = self._release_factor(seg.id)
@@ -251,14 +258,20 @@ class TrafficModel:
         return False
 
     def _turns_left(self, v: Vehicle, seg: Segment) -> bool:
-        return v.next_seg is not None and self.grid.segments[v.next_seg].direction == seg.direction.left()
+        if v.next_seg is None:
+            return False
+        key = (seg.id, v.next_seg)
+        kind = self._kind_cache.get(key)
+        if kind is None:
+            kind = self._kind_cache[key] = self.net.turn_kind(seg.id, v.next_seg)
+        return kind == "left"
 
     def _oncoming_conflict(self, seg: Segment) -> bool:
         """Is oncoming traffic about to enter the box from the opposite approach?"""
-        opp_id = self.grid.in_seg[seg.to_node][seg.direction.opposite]
+        opp_id = self.net.partner.get(seg.id)
         if opp_id is None:
             return False
-        opp = self.grid.segments[opp_id]
+        opp = self.net.segments[opp_id]
         for u in self.lanes[opp_id]:
             if u.kind == "blocker" or u.pos < opp.stop_pos - 25.0:
                 continue
@@ -271,7 +284,7 @@ class TrafficModel:
     def _can_enter(self, v: Vehicle) -> bool:
         if v.next_seg is None:
             return True
-        # one stream at a time may merge into a link; the box is not shared by two merging streams
+        # one stream at a time may merge into an edge; the box is not shared by two merging streams
         if any(src != v.seg for src in self.in_box.get(v.next_seg, {}).values()):
             return False
         lane = self.lanes[v.next_seg]
@@ -282,36 +295,43 @@ class TrafficModel:
 
     def _cross(self, seg: Segment, v: Vehicle) -> None:
         """The vehicle has reached the intersection centre: hand it to the next segment."""
-        if seg.kind == "exit":
+        tgt = v.next_seg
+        if tgt is None:  # a car reached its exit gate
             self.exited += 1
             return
-        tgt = v.next_seg
-        assert tgt is not None
         self.in_box.get(tgt, {}).pop(v.id, None)
-        v.seg, v.pos = tgt, v.pos - seg.length
+        v.seg, v.pos = tgt, max(0.0, v.pos - seg.length)
         self.lanes[tgt].append(v)
-        if v.route is not None:
-            v.leg = (v.leg + 1) % len(v.route)
-            if v.leg == 0:
-                v.laps += 1
-            v.next_seg = v.route[(v.leg + 1) % len(v.route)]
-        else:
-            assert v.goal is not None
-            v.next_seg = self.grid.choose_next(tgt, v.goal, self.rng, self.cfg.route_follow)
+        v.leg += 1
+        if v.cyclic and v.route is not None and v.leg >= len(v.route):
+            v.leg = 0
+            v.laps += 1
+        v.next_seg = self._next_on_route(v)
 
     def _spawn(self, dt: float) -> None:
         cfg = self.cfg
         p = 1.0 - math.exp(-cfg.gate_demand * dt)
-        for sid in self.grid.entries:
+        for gate in self.net.gates:
             if self.rng.random() < p:
-                if self.backlog[sid] < cfg.spawn_backlog_max:
-                    self.backlog[sid] += 1
+                if self.backlog[gate] < cfg.spawn_backlog_max:
+                    self.backlog[gate] += 1
                 else:
                     self.dropped += 1
-            if self.backlog[sid] and self._can_spawn(sid):
-                self.backlog[sid] -= 1
-                self.lanes[sid].append(self._make_car(sid, 0.0, 0.7 * cfg.free_speed))
+            if self.backlog[gate]:
+                self._try_spawn(gate)
 
-    def _can_spawn(self, seg_id: int) -> bool:
-        lane = self.lanes[seg_id]
-        return not lane or lane[-1].pos - lane[-1].length >= self.cfg.car_length + self.cfg.min_gap + 2.0
+    def _try_spawn(self, gate: int) -> None:
+        for _ in range(4):  # pick a destination that is reachable
+            dest = self.rng.choice([g for g in self.net.gates if g != gate])
+            path = self.net.path_between(gate, dest)
+            if path:
+                break
+        else:
+            return
+        first = path[0]
+        lane = self.lanes[first]
+        if self.in_box.get(first):  # through traffic is already crossing the gate junction into this edge
+            return
+        if not lane or lane[-1].pos - lane[-1].length >= self.cfg.car_length + self.cfg.min_gap + 2.0:
+            self.backlog[gate] -= 1
+            self.lanes[first].append(self._make_car(path, 0, 0.0, 0.7 * self.net.segments[first].speed_limit))

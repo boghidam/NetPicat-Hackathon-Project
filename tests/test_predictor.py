@@ -1,86 +1,121 @@
 import pytest
 
 from smartcity.config import Config
+from smartcity.data import build_city
 from smartcity.events import EventLog
 from smartcity.mock_api import BusTelemetry
-from smartcity.network import CityGrid
 from smartcity.predictor import PostIntersectionPredictor
-
-ROW = [(4, 5), (5, 6), (6, 7)]  # eastbound along row 1
 
 
 def make(**kw):
     cfg = Config(**kw)
-    grid = CityGrid(cfg)
-    return cfg, grid, PostIntersectionPredictor(grid, cfg, EventLog())
+    net = build_city("grid", cfg)
+    route = net.route_by_ref["G5"]  # row 1, out and back: 4>5>6>7>6>5
+    return cfg, net, route, PostIntersectionPredictor(net, cfg, EventLog())
 
 
-def drive(pred, grid, cfg, bus, seg_ratios, t0=0.0):
-    """Feed telemetry for a bus that crosses segments at the given constant speed ratios."""
+def drive(pred, net, route, bus, legs_ratios, t0=0.0, line=None):
+    """Feed telemetry for a bus that crosses edges of its line at the given constant speed ratios."""
     t, delay = t0, 0.0
-    for seg, ratio in seg_ratios:
+    for leg, ratio in legs_ratios:
+        seg = net.segments[route.edges[leg % len(route.edges)]]
+        speed = ratio * seg.speed_limit
         for d in (190.0, 150.0, 110.0, 70.0, 30.0, 4.0):
-            t += 200.0 / (ratio * cfg.free_speed) / 6
+            t += seg.length / speed / 6
             delay += (1 - ratio) * 2.0
-            pred.on_telemetry(BusTelemetry(bus, t, 0, 0, seg, d, ratio * cfg.free_speed, cfg.free_speed, delay))
+            pred.on_telemetry(
+                BusTelemetry(
+                    bus,
+                    t,
+                    0,
+                    0,
+                    seg.id,
+                    d,
+                    speed,
+                    seg.speed_limit,
+                    delay,
+                    line=route.ref if line is None else line,
+                    leg=leg % len(route.edges),
+                )
+            )
     return t
 
 
-def seg(grid, a, b):
-    return grid.segment_between(a, b)
+def hops(pred, bus, now=0.0):
+    return sorted((f for f in pred.active(now) if f.source_bus == bus), key=lambda f: f.hop)
 
 
 def test_forecast_issued_only_after_a_crossing():
-    cfg, grid, pred = make()
-    drive(pred, grid, cfg, "B00", [(seg(grid, 4, 5), 0.5)])
-    assert pred.active(now=0.0) == []  # no history yet: first segment only
-    drive(pred, grid, cfg, "B00", [(seg(grid, 5, 6), 0.5)], t0=100.0)
-    targets = {f.target_segment for f in pred.active(now=100.0)}
-    assert seg(grid, 5, 6) in targets
+    cfg, net, route, pred = make()
+    drive(pred, net, route, "B00", [(0, 0.5)])
+    assert pred.active(now=0.0) == []  # no history yet: still on its first edge
+    drive(pred, net, route, "B00", [(1, 0.5)], t0=100.0)
+    assert route.edges[1] in {f.target_segment for f in pred.active(now=100.0)}
 
 
 def test_slow_history_predicts_denser_traffic_than_fast_history():
-    cfg, grid, pred = make()
-    drive(pred, grid, cfg, "SLOW", [(seg(grid, 4, 5), 0.2), (seg(grid, 5, 6), 0.2)])
-    drive(pred, grid, cfg, "FAST", [(seg(grid, 4, 5), 0.95), (seg(grid, 5, 6), 0.95)])
-    slow = next(f for f in pred.active(0) if f.source_bus == "SLOW" and f.hop == 1)
-    fast = next(f for f in pred.active(0) if f.source_bus == "FAST" and f.hop == 1)
+    cfg, net, route, pred = make()
+    drive(pred, net, route, "SLOW", [(0, 0.2), (1, 0.2)])
+    drive(pred, net, route, "FAST", [(0, 0.95), (1, 0.95)])
+    slow, fast = hops(pred, "SLOW")[0], hops(pred, "FAST")[0]
     assert slow.predicted_density > fast.predicted_density + 0.4
-    assert slow.eta - 0 > 0 and slow.predicted_speed < fast.predicted_speed
+    assert slow.predicted_speed < fast.predicted_speed
+    assert slow.predicted_delay > 5.0 > fast.predicted_delay  # seconds lost on that edge
 
 
-def test_second_hop_has_lower_confidence_and_later_eta():
-    cfg, grid, pred = make()
-    drive(pred, grid, cfg, "B00", [(seg(grid, 4, 5), 0.4), (seg(grid, 5, 6), 0.4)])
-    hop1 = next(f for f in pred.active(0) if f.hop == 1)
-    hop2 = next(f for f in pred.active(0) if f.hop == 2)
-    assert hop2.target_segment == seg(grid, 6, 7)
-    assert hop2.confidence == pytest.approx(hop1.confidence * cfg.pred_hop2_decay)
-    assert hop2.eta > hop1.eta
+def test_forecasts_follow_the_buses_route_for_several_hops():
+    cfg, net, route, pred = make()
+    drive(pred, net, route, "B00", [(0, 0.4), (1, 0.4)])  # has just entered leg 1
+    fs = hops(pred, "B00")
+    assert [f.hop for f in fs] == list(range(1, cfg.pred_hops + 1))
+    assert [f.target_segment for f in fs] == [route.edges[1], route.edges[2], route.edges[3]]  # along the line
+    assert all(b.eta > a.eta for a, b in zip(fs, fs[1:], strict=False))
+    assert fs[1].confidence == pytest.approx(fs[0].confidence * cfg.pred_hop_decay)
+    assert fs[2].confidence == pytest.approx(fs[1].confidence * cfg.pred_hop_decay)
+    assert all(f.line == "G5" for f in fs)
 
 
-def test_forecast_resolves_when_bus_leaves_segment_and_records_error():
-    cfg, grid, pred = make()
-    drive(pred, grid, cfg, "B00", [(seg(grid, 4, 5), 0.5), (seg(grid, 5, 6), 0.5), (seg(grid, 6, 7), 0.5)])
-    assert pred.resolved == 1
-    assert pred.recent_resolved
-    assert all(f.hop == 2 or f.target_segment == seg(grid, 6, 7) for f in pred.active(0))
+def test_route_wraps_around_the_loop():
+    cfg, net, route, pred = make()
+    last = len(route.edges) - 1
+    drive(pred, net, route, "B00", [(last - 1, 0.5), (last, 0.5)])
+    assert [f.target_segment for f in hops(pred, "B00")] == [route.edges[last], route.edges[0], route.edges[1]]
+
+
+def test_a_bus_without_a_known_line_only_gets_the_next_edge_forecast():
+    cfg, net, route, pred = make()
+    drive(pred, net, route, "B00", [(0, 0.5), (1, 0.5)], line="??")
+    assert [f.hop for f in hops(pred, "B00")] == [1]
+
+
+def test_forecast_window_moves_ahead_as_the_bus_clears_each_junction():
+    cfg, net, route, pred = make()
+    drive(pred, net, route, "B00", [(0, 0.5), (1, 0.5)])
+    before = [f.target_segment for f in hops(pred, "B00")]
+    drive(pred, net, route, "B00", [(2, 0.5)], t0=200.0)
+    after = [f.target_segment for f in hops(pred, "B00", now=200.0)]
+    assert before[0] == route.edges[1] and after == [route.edges[2], route.edges[3], route.edges[4]]
+
+
+def test_forecast_resolves_when_bus_leaves_the_edge_and_records_error():
+    cfg, net, route, pred = make()
+    drive(pred, net, route, "B00", [(0, 0.5), (1, 0.5), (2, 0.5)])
+    assert pred.resolved == 1 and pred.recent_resolved
+    assert all(f.target_segment != route.edges[1] for f in pred.active(0))
 
 
 def test_forecasts_expire():
-    cfg, grid, pred = make()
-    drive(pred, grid, cfg, "B00", [(seg(grid, 4, 5), 0.5), (seg(grid, 5, 6), 0.5)])
+    cfg, net, route, pred = make()
+    drive(pred, net, route, "B00", [(0, 0.5), (1, 0.5)])
     assert pred.active(now=1e6) == []
 
 
 def test_ridge_replaces_ewma_and_learns_a_persistent_pattern():
-    cfg, grid, pred = make(pred_min_samples=20, pred_refit_every=5)
+    cfg, net, route, pred = make(pred_min_samples=20, pred_refit_every=5)
     assert pred.model_name == "EWMA"
-    legs = [seg(grid, 4, 5), seg(grid, 5, 6), seg(grid, 6, 7)]
-    for i in range(60):  # buses whose next-segment speed tracks their recent speed
+    for i in range(60):  # buses whose next-edge speed tracks their recent speed
         r = 0.15 + 0.8 * ((i * 37) % 100) / 100
-        drive(pred, grid, cfg, f"T{i}", [(leg, r) for leg in legs])
+        drive(pred, net, route, f"T{i}", [(0, r), (1, r), (2, r)])
     assert pred.model_name == "RIDGE"
-    drive(pred, grid, cfg, "TEST", [(legs[0], 0.3), (legs[1], 0.3)])
-    f = next(f for f in pred.active(0) if f.source_bus == "TEST" and f.hop == 1)
-    assert f.predicted_density == pytest.approx(0.7, abs=0.15)
+    drive(pred, net, route, "TEST", [(0, 0.3), (1, 0.3)])
+    assert hops(pred, "TEST")[0].predicted_density == pytest.approx(0.7, abs=0.15)

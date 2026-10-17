@@ -20,7 +20,7 @@ import numpy as np
 from .config import Config
 from .events import EventLog
 from .mock_api import BusTelemetry
-from .network import CityGrid
+from .network import RoadNetwork
 
 MIN_RATIO = 0.05
 
@@ -30,13 +30,15 @@ class Forecast:
     id: int
     source_bus: str
     target_segment: int
-    hop: int  # 1 = segment the bus just entered, 2 = the one after
+    hop: int  # 1 = edge the bus just entered, 2.. = the next edges along its route
     issued_at: float
     eta: float  # absolute sim time the bus is expected at the stop line
     predicted_speed: float
-    predicted_density: float  # 0..1, fraction of jam density
+    predicted_density: float  # 0..1: 1 - predicted speed / speed limit
     confidence: float  # 0..1
     expires_at: float
+    predicted_delay: float = 0.0  # extra seconds over free flow expected on this edge
+    line: str = ""  # the bus's public line
 
 
 @dataclass
@@ -63,8 +65,8 @@ class _Track:
 class PostIntersectionPredictor:
     FEATURES = 5  # bias, mean ratio, last ratio, delay rate, trend
 
-    def __init__(self, grid: CityGrid, cfg: Config, events: EventLog):
-        self.grid, self.cfg, self.events = grid, cfg, events
+    def __init__(self, net: RoadNetwork, cfg: Config, events: EventLog):
+        self.net, self.cfg, self.events = net, cfg, events
         self._tracks: dict[str, _Track] = {}
         self._active: dict[int, Forecast] = {}
         self._ids = itertools.count(1)
@@ -72,7 +74,7 @@ class PostIntersectionPredictor:
         self._trained_total = 0
         self._weights: np.ndarray | None = None
         self.mae_ratio = 0.15  # EWMA of |predicted - actual| speed ratio
-        self.mae_speed = 0.15 * cfg.free_speed
+        self.mae_speed = 0.15 * 13.0  # m/s, refined as forecasts resolve
         self.mae_eta = 0.0
         self.resolved = 0
         self.issued = 0
@@ -101,7 +103,7 @@ class PostIntersectionPredictor:
 
     def _accumulate(self, track: _Track, tel: BusTelemetry) -> None:
         cfg = self.cfg
-        seg = self.grid.segments[tel.segment_id]
+        seg = self.net.segments[tel.segment_id]
         pos = seg.stop_pos - tel.dist_to_next_node
         if pos >= cfg.est_skip_start and tel.dist_to_next_node >= cfg.est_skip_end:
             track.ratio_sum += max(0.0, min(1.0, tel.speed / tel.free_speed))
@@ -157,22 +159,31 @@ class PostIntersectionPredictor:
         ratio = min(1.0, max(MIN_RATIO, ratio))
         confidence *= 0.6 + 0.4 * min(1.0, len(track.history) / cfg.pred_history)
 
-        seg = self.grid.segments[tel.segment_id]
-        speed = max(1.0, ratio * cfg.free_speed)
+        seg = self.net.segments[tel.segment_id]
+        speed = max(1.0, ratio * seg.speed_limit)
         eta = tel.t + tel.dist_to_next_node / speed
         f1 = self._publish(tel, seg.id, 1, eta, ratio, confidence)
         track.pending = (f1, x)
 
-        nxt = self.grid.straight_next(seg.id)
-        if nxt is not None and self.grid.segments[nxt].signalised:
-            ratio2 = 0.6 * ratio + 0.4 * (1.0 - cfg.est_prior_load)  # persistence, regressing to normal
-            eta2 = eta + self.grid.segments[nxt].length / max(1.0, ratio2 * cfg.free_speed)
-            self._publish(tel, nxt, 2, eta2, ratio2, confidence * cfg.pred_hop2_decay)
+        # Follow the bus's predefined route: forecast the next links with persistence that
+        # relaxes toward normal flow, less confidently the further ahead they are.
+        route = self.net.route_by_ref.get(tel.line)
+        if route is None:
+            return
+        edges, leg = route.edges, tel.leg
+        for hop in range(2, cfg.pred_hops + 1):
+            nxt = edges[(leg + hop - 1) % len(edges)]
+            ratio = 0.6 * ratio + 0.4 * (1.0 - cfg.est_prior_load)
+            eta += self.net.segments[nxt].length / max(1.0, ratio * self.net.segments[nxt].speed_limit)
+            confidence *= cfg.pred_hop_decay
+            self._publish(tel, nxt, hop, eta, ratio, confidence)
 
     def _publish(
         self, tel: BusTelemetry, seg_id: int, hop: int, eta: float, ratio: float, confidence: float
     ) -> Forecast:
         cfg = self.cfg
+        target_seg = self.net.segments[seg_id]
+        free_time = target_seg.length / target_seg.speed_limit
         f = Forecast(
             id=next(self._ids),
             source_bus=tel.bus_id,
@@ -180,18 +191,20 @@ class PostIntersectionPredictor:
             hop=hop,
             issued_at=tel.t,
             eta=eta,
-            predicted_speed=ratio * cfg.free_speed,
+            predicted_speed=ratio * target_seg.speed_limit,
             predicted_density=1.0 - ratio,
             confidence=confidence,
             expires_at=eta + cfg.pred_ttl_margin,
+            predicted_delay=max(0.0, target_seg.length / max(1.0, ratio * target_seg.speed_limit) - free_time),
+            line=tel.line,
         )
         self._active[f.id] = f
         self.issued += 1
-        target = self.grid.segments[seg_id].to_node
+        target = target_seg.to_node
         self.events.add(
             tel.t,
             "FORECAST",
-            f"{tel.bus_id} -> seg{seg_id} (n{target}) hop{hop}: density {f.predicted_density:.2f} "
+            f"{tel.bus_id} L{tel.line} -> seg{seg_id} (n{target}) hop{hop}: density {f.predicted_density:.2f} "
             f"ETA {eta - tel.t:4.1f}s conf {confidence:.2f} [{self.model_name}]",
             node=target,
         )
@@ -203,11 +216,12 @@ class PostIntersectionPredictor:
         forecast, x = track.pending  # type: ignore[misc]
         self._active.pop(forecast.id, None)
         arrival = track.arrived_t if track.arrived_t is not None else tel.t
-        err_ratio = abs(forecast.predicted_speed / cfg.free_speed - actual_ratio)
+        limit = self.net.segments[forecast.target_segment].speed_limit
+        err_ratio = abs(forecast.predicted_speed / limit - actual_ratio)
         err_eta = abs(forecast.eta - arrival)
         a = 0.1
         self.mae_ratio += a * (err_ratio - self.mae_ratio)
-        self.mae_speed = self.mae_ratio * cfg.free_speed
+        self.mae_speed = self.mae_ratio * limit
         self.mae_eta += a * (err_eta - self.mae_eta) if self.resolved else (err_eta - self.mae_eta)
         self.resolved += 1
         msg = (
@@ -215,7 +229,7 @@ class PostIntersectionPredictor:
             f"{forecast.predicted_density:.2f}, actual {1 - actual_ratio:.2f} (ETA err {err_eta:.1f}s)"
         )
         self.recent_resolved.append(msg)
-        self.events.add(tel.t, "FORECAST_RESOLVED", msg, node=self.grid.segments[forecast.target_segment].to_node)
+        self.events.add(tel.t, "FORECAST_RESOLVED", msg, node=self.net.segments[forecast.target_segment].to_node)
 
         self._train.append((x, actual_ratio))
         self._trained_total += 1

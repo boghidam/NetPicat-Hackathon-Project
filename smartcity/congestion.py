@@ -6,7 +6,7 @@ import math
 
 from .config import Config
 from .mock_api import BusTelemetry
-from .network import CityGrid
+from .network import RoadNetwork
 
 
 class CongestionEstimator:
@@ -18,16 +18,16 @@ class CongestionEstimator:
     congestion score.
     """
 
-    def __init__(self, grid: CityGrid, cfg: Config):
-        self.grid, self.cfg = grid, cfg
-        n = len(grid.segments)
+    def __init__(self, net: RoadNetwork, cfg: Config):
+        self.net, self.cfg = net, cfg
+        n = len(net.segments)
         self.ratio = [1.0 - cfg.est_prior_load] * n
         self.samples = [0] * n
         self.last_seen = [-math.inf] * n
 
     def on_telemetry(self, tel: BusTelemetry) -> None:
         cfg = self.cfg
-        seg = self.grid.segments[tel.segment_id]
+        seg = self.net.segments[tel.segment_id]
         pos = seg.stop_pos - tel.dist_to_next_node
         if pos < cfg.est_skip_start or tel.dist_to_next_node < cfg.est_skip_end:
             return

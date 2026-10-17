@@ -7,12 +7,11 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Config:
-    # --- city grid -------------------------------------------------------
-    rows: int = 4
-    cols: int = 4
-    block_length: float = 200.0  # m between adjacent intersection centres
-    gate_length: float = 100.0  # m of the entry/exit road beyond the west and east edge nodes
+    # --- road network ----------------------------------------------------
     box_half: float = 14.0  # m from an intersection centre to its stop lines (half the junction box)
+    min_approaches: int = 3  # a node with at least this many incoming roads gets signals
+    gate_band: float = 150.0  # m: nodes this close to the map edge can be gates where cars enter and leave
+    max_gates: int = 10
     seed: int = 7
 
     # --- simulation clock ------------------------------------------------
@@ -20,7 +19,6 @@ class Config:
     decision_period: float = 0.5  # s between controller decisions / coordinator refresh
 
     # --- vehicles --------------------------------------------------------
-    free_speed: float = 12.0  # m/s (buses drive exactly this; cars vary a little)
     car_speed_var: float = 0.08
     car_length: float = 4.5
     bus_length: float = 11.0
@@ -29,24 +27,24 @@ class Config:
     comfort_brake: float = 3.0  # m/s^2 used to plan stops and following distance
     max_brake: float = 6.0  # m/s^2 emergency limit
     sat_flow: float = 0.5  # veh/s one lane discharges; sets the headway when throttled
-    lane_offset: float = 5.0  # m lateral offset so opposite directions don't overlap
+    lane_offset: float = 3.0  # m lateral offset so opposite directions don't overlap
 
     # --- cars ------------------------------------------------------------
-    gate_demand: float = 0.12  # veh/s entering at each gate
-    initial_cars: int = 70
-    route_follow: float = 0.8  # chance a car takes a turn that gets it closer to its exit
+    gate_demand: float = 0.08  # veh/s entering at each gate
+    initial_cars: int = 150
     spawn_backlog_max: int = 40  # cars waiting outside a blocked gate before new ones are dropped
 
     # --- buses -----------------------------------------------------------
-    buses_per_route: int = 2
+    bus_headway_m: float = 3500.0  # one bus per this much route length (at least 2 per line)
+    max_buses_per_line: int = 5
 
-    # --- signals ---------------------------------------------------------
+    # --- signals (SUMO-style safety timings) ----------------------------------
     # Opposite streets are green together; yellow then all-red clears the box between phases.
-    base_green: float = 18.0  # s, the "standard timer" per phase
-    yellow: float = 2.0
-    all_red: float = 1.5
-    min_green: float = 8.0
-    max_green: float = 36.0
+    base_green: float = 20.0  # s, the "standard timer" per phase
+    min_green: float = 7.0  # never shorter: prevents rapid flickering
+    yellow: float = 3.0
+    all_red: float = 2.0  # clearance before the conflicting phase starts
+    max_green: float = 45.0
 
     # --- congestion estimator -------------------------------------------
     est_alpha: float = 0.3  # EWMA smoothing
@@ -57,7 +55,8 @@ class Config:
 
     # --- local optimisation ---------------------------------------------
     v_slow_frac: float = 0.5  # bus slower than this fraction of free speed => slow
-    d_trigger: float = 120.0  # m from stop line within which a slow bus counts
+    loop_windows: tuple[float, float, float] = (50.0, 150.0, 300.0)  # m before the stop line: virtual detection loops
+    d_trigger: float = 150.0  # m: a slow bus inside this window counts as congestion at the line
     ext_gain: float = 8.0  # s: extension = gain * (1 - speed / v_slow)
     ext_remaining: float = 4.0  # only extend when this little green remains
     ext_cooldown: float = 3.0
@@ -86,7 +85,8 @@ class Config:
     pred_ridge_lambda: float = 1.0
     pred_refit_every: int = 10
     pred_ttl_margin: float = 25.0
-    pred_hop2_decay: float = 0.5  # confidence multiplier for the second hop
+    pred_hops: int = 3  # links ahead along the bus's route that each forecast covers
+    pred_hop_decay: float = 0.6  # confidence multiplier per extra hop
     pred_decay_tau: float = 40.0  # s: how quickly a forecast's weight fades with ETA
     lead_window: float = 10.0  # s before ETA in which the target pre-adjusts
     pred_density_min: float = 0.2  # predicted density that justifies pre-adjusting

@@ -1,14 +1,15 @@
 """Signal control: per-intersection phase machines and the network-wide coordinator.
 
-Each intersection serves one *phase* at a time: opposite streets are green together (and red
-together), an unpaired street (the stem of a T-junction) has a phase of its own. Every green is
-followed by yellow and a short all-red interval that clears the junction box, then the next phase.
-A 4-way junction runs 2 phases (N+S, then E+W); a T-junction runs 2 (E+W, then the stem).
+Each signalised intersection serves one *phase* at a time: approaches whose headings are roughly
+opposite are green together (and red together), an unpaired street has a phase of its own.
+SUMO-style safety rules apply: a green never lasts less than `min_green` (7 s), then comes a 3 s
+yellow and a 2 s all-red clearance before the conflicting phase starts.
 
 The coordinator is where the global optimisation lives. It turns bus-derived congestion
-estimates and AI forecasts into per-segment loads, and from those into (a) a throttle on how
-fast each approach may release cars, (b) dynamic phase scores that size each green and can end
-one early, and (c) a grid-wide budget on green extensions.
+estimates (per-link EWMA plus virtual detection loops) and AI forecasts into per-edge loads, and
+from those, walking the road graph to the *junction at the end of each release*, into (a) a
+throttle on how fast each approach may release cars, (b) dynamic phase scores that size each green
+and can end one early, and (c) a grid-wide budget on green extensions.
 """
 
 from __future__ import annotations
@@ -19,10 +20,13 @@ from dataclasses import dataclass
 
 from .config import Config
 from .congestion import CongestionEstimator
+from .detection import DetectionLoops
 from .events import EventLog
 from .mock_api import BusTelemetry
-from .network import CityGrid
+from .network import RoadNetwork
 from .predictor import Forecast, PostIntersectionPredictor
+
+JUNCTION_WEIGHT = 0.85  # how much of a downstream junction's congestion counts against releasing into it
 
 
 @dataclass(frozen=True)
@@ -39,48 +43,60 @@ class Score:
 class NetworkCoordinator:
     def __init__(
         self,
-        grid: CityGrid,
+        net: RoadNetwork,
         cfg: Config,
         estimator: CongestionEstimator,
         predictor: PostIntersectionPredictor,
+        loops: DetectionLoops,
         events: EventLog,
         adaptive: bool = True,
     ):
-        self.grid, self.cfg = grid, cfg
-        self.estimator, self.predictor, self.events = estimator, predictor, events
+        self.net, self.cfg = net, cfg
+        self.estimator, self.predictor, self.loops, self.events = estimator, predictor, loops, events
         self.adaptive = adaptive
         self.controllers: dict[int, IntersectionController] = {}
-        n = len(grid.segments)
-        self.latest: dict[str, BusTelemetry] = {}
-        self._by_seg: dict[int, list[BusTelemetry]] = {}
-        self.est_load = [cfg.est_prior_load] * n  # from bus telemetry only
+        n = len(net.segments)
+        self.est_load = [cfg.est_prior_load] * n  # bus telemetry: per-link EWMA and detection loops
         self.fc_load = [0.0] * n  # from AI forecasts only
         self.load = [cfg.est_prior_load] * n  # what the controllers act on
-        self.dload = [0.0] * n  # worst load among the links an approach releases into
+        self.junction_load = [cfg.est_prior_load] * len(net.nodes)  # congestion at the end of each approach set
+        self.dload = [0.0] * n  # worst downstream load an approach would release into
         self._worst = [-1] * n
         self.throttle = [1.0] * n
         self._throttled: set[int] = set()
         self._ext_log: deque[tuple[float, int, float]] = deque()
         self._last_log: dict[tuple[str, int], float] = {}
-        self._neighbours = {node.id: grid.neighbours(node.id) for node in grid.nodes}
+        self._neighbours = {node.id: net.neighbours(node.id) for node in net.nodes}
 
+    # -- names for logs and the HUD ------------------------------------------
     def label(self, seg_id: int) -> str:
-        """Human name of an approach, e.g. 'n5/W' for the street arriving at node 5 from the west."""
-        seg = self.grid.segments[seg_id]
-        return f"n{seg.to_node}/{seg.from_side.name}"
+        seg = self.net.segments[seg_id]
+        return f"n{seg.to_node} {(seg.name or seg.highway or seg.arrives_from)[:22]}"
+
+    def label_group(self, group: list[int]) -> str:
+        node = self.net.segments[group[0]].to_node
+        names = []
+        for a in group:
+            seg = self.net.segments[a]
+            name = (seg.name or seg.highway or seg.arrives_from)[:18]
+            if name not in names:
+                names.append(name)
+        return f"n{node} " + "/".join(names)
 
     # -- intake / periodic refresh -----------------------------------------
     def observe(self, tel: BusTelemetry) -> None:
-        self.latest[tel.bus_id] = tel
+        self.loops.observe(tel)
 
     def refresh(self, now: float) -> None:
-        cfg, grid = self.cfg, self.grid
-        self._by_seg = {}
-        for tel in self.latest.values():
-            self._by_seg.setdefault(tel.segment_id, []).append(tel)
-        for seg in grid.segments:
+        cfg, net = self.cfg, self.net
+        self.loops.refresh()
+        for seg in net.segments:
             sid = seg.id
-            self.est_load[sid] = self.estimator.load(sid, now)
+            load = self.estimator.load(sid, now)
+            reading = self.loops.reading(sid)
+            if reading is not None and reading.density is not None:
+                load = max(load, reading.density)
+            self.est_load[sid] = load
             self.fc_load[sid] = max(
                 (
                     f.predicted_density * f.confidence * math.exp(-max(0.0, f.eta - now) / cfg.pred_decay_tau)
@@ -88,40 +104,46 @@ class NetworkCoordinator:
                 ),
                 default=0.0,
             )
-            self.load[sid] = max(self.est_load[sid], self.fc_load[sid])
-        for seg in grid.segments:
-            if not seg.signalised:
-                continue
+            self.load[sid] = max(load, self.fc_load[sid])
+        for node in net.nodes:  # congestion of a junction: the two worst approaches into it
+            loads = sorted((self.load[s] for s in net.in_segs[node.id]), reverse=True)[:2]
+            self.junction_load[node.id] = sum(loads) / len(loads) if loads else 0.0
+        for seg in net.segments:
+            sid = seg.id
             worst, worst_id = 0.0, -1
-            for target, _share in grid.turn_targets(seg.id):
-                if grid.segments[target].signalised and self.load[target] > worst:
-                    worst, worst_id = self.load[target], target
-            self.dload[seg.id], self._worst[seg.id] = worst, worst_id
-            if not self.adaptive:
-                self.throttle[seg.id] = 1.0
+            for target, _share in net.turn_targets(sid):
+                # releasing onto an edge also loads the junction it leads to
+                t_load = max(self.load[target], JUNCTION_WEIGHT * self.junction_load[net.segments[target].to_node])
+                if t_load > worst:
+                    worst, worst_id = t_load, target
+            self.dload[sid], self._worst[sid] = worst, worst_id
+            if not self.adaptive or seg.to_node not in self.controllers:
+                self.throttle[sid] = 1.0
                 continue
             # Backpressure: meter only when this release would push traffic onto a link
             # that is clearly worse off than the one it leaves (shifting the bottleneck).
             # When everything is uniformly busy, metering would just waste green.
-            excess = worst - max(cfg.rho_gate, self.load[seg.id])
+            excess = worst - max(cfg.rho_gate, self.load[sid])
             g = 1.0 - excess / (cfg.rho_block - cfg.rho_gate) if excess > 0.0 else 1.0
             g = max(0.0, min(1.0, g))
             # Buses share the single lane with the cars and cannot pass them, so metering cars
             # would hold up a bus queued behind them: leave an approach alone while one is close.
-            if any(t.dist_to_next_node <= cfg.d_trigger for t in self._by_seg.get(seg.id, ())):
+            reading = self.loops.reading(sid)
+            if reading is not None and reading.count[1] > 0:
                 g = 1.0
-            self.throttle[seg.id] = g
-            self._log_throttle(now, seg.id, g)
+            self.throttle[sid] = g
+            self._log_throttle(now, sid, g)
 
     def _log_throttle(self, now: float, sid: int, g: float) -> None:
-        seg = self.grid.segments[sid]
+        seg = self.net.segments[sid]
         if g < 0.8 and sid not in self._throttled:
             self._throttled.add(sid)
+            target = self.net.segments[self._worst[sid]]
+            where = target.name or f"seg{target.id}"
             self.events.add(
                 now,
                 "THROTTLE",
-                f"{self.label(sid)} seg{sid}: car release metered to {g:.0%} "
-                f"(next link seg{self._worst[sid]} load {self.dload[sid]:.2f})",
+                f"{self.label(sid)}: car release metered to {g:.0%} (downstream {where[:20]} load {self.dload[sid]:.2f})",
                 node=seg.to_node,
             )
         elif g >= 0.95:
@@ -135,36 +157,27 @@ class NetworkCoordinator:
 
     # -- what the signals / traffic model read ------------------------------
     def signal_state(self, seg_id: int) -> str:
-        seg = self.grid.segments[seg_id]
-        if not seg.signalised:
-            return "G"
-        return self.controllers[seg.to_node].state_for(seg_id)
+        ctl = self.controllers.get(self.net.segments[seg_id].to_node)
+        return "G" if ctl is None else ctl.state_for(seg_id)
 
     def release_factor(self, seg_id: int) -> float:
         return self.throttle[seg_id] if self.adaptive else 1.0
 
-    # -- scoring -------------------------------------------------------------
+    # -- sensing ---------------------------------------------------------------
     def slow_bus(self, seg_id: int) -> BusTelemetry | None:
-        cfg = self.cfg
-        worst: BusTelemetry | None = None
-        for tel in self._by_seg.get(seg_id, ()):
-            if tel.dist_to_next_node <= cfg.d_trigger and tel.speed < cfg.v_slow_frac * tel.free_speed:
-                if worst is None or tel.speed < worst.speed:
-                    worst = tel
-        return worst
+        """The slowest bus inside the 150 m detection window of an approach, if it is crawling."""
+        reading = self.loops.reading(seg_id)
+        return reading.slowest if reading is not None else None
 
     def forecasts_for(self, seg_id: int, now: float) -> list[Forecast]:
         return sorted((f for f in self.predictor.incoming(seg_id, now) if f.eta >= now), key=lambda f: f.eta)
 
     def score(self, seg_id: int, now: float) -> Score:
         cfg = self.cfg
-        seg = self.grid.segments[seg_id]
+        seg = self.net.segments[seg_id]
         pressure = max(0.0, self.est_load[seg_id] - 0.5 * self.dload[seg_id])
-        bus_delay = 0.0
-        for tel in self._by_seg.get(seg_id, ()):
-            if tel.dist_to_next_node <= 150.0:
-                slowness = 1.0 - min(1.0, tel.speed / tel.free_speed)
-                bus_delay = max(bus_delay, slowness * (1.0 - 0.5 * tel.dist_to_next_node / 150.0))
+        reading = self.loops.reading(seg_id)
+        bus_delay = reading.delay_score if reading is not None else 0.0
         forecast = self.fc_load[seg_id]
         ctl = self.controllers.get(seg.to_node)
         age = min(1.0, (ctl.red_time(seg_id, now) if ctl else 0.0) / cfg.age_full)
@@ -180,10 +193,6 @@ class NetworkCoordinator:
         )
 
     # -- phases are groups of opposite approaches -----------------------------
-    def label_group(self, group: list[int]) -> str:
-        node = self.grid.segments[group[0]].to_node
-        return f"n{node}/" + "+".join(self.grid.segments[a].from_side.name for a in group)
-
     def group_score(self, group: list[int], now: float) -> Score:
         return max((self.score(a, now) for a in group), key=lambda sc: sc.total)
 
@@ -223,7 +232,8 @@ class NetworkCoordinator:
                 now,
                 "BUDGET_DENIED",
                 node,
-                f"n{node}: extension of {seconds:.1f}s denied (grid budget {used:.0f}/{cfg.budget_seconds:.0f}s)",
+                f"n{node}: extension of {seconds:.1f}s denied (network budget {used:.0f}/{cfg.budget_seconds:.0f}s, "
+                f"{len(recent_nb)} neighbour(s) just extended)",
             )
             return 0.0
         self._ext_log.append((now, node, granted))
@@ -233,15 +243,15 @@ class NetworkCoordinator:
 class IntersectionController:
     """Phase signal: opposite streets share a green; standard timer plus adaptive overrides."""
 
-    def __init__(self, node: int, grid: CityGrid, cfg: Config, coord: NetworkCoordinator, events: EventLog):
-        self.node, self.grid, self.cfg, self.coord, self.events = node, grid, cfg, coord, events
-        self.groups: list[list[int]] = grid.phase_groups(node)
+    def __init__(self, node: int, net: RoadNetwork, cfg: Config, coord: NetworkCoordinator, events: EventLog):
+        self.node, self.net, self.cfg, self.coord, self.events = node, net, cfg, coord, events
+        self.groups: list[list[int]] = net.phase_groups(node)
         self.approaches: list[int] = [a for g in self.groups for a in g]
         self._group_of = {a: gi for gi, g in enumerate(self.groups) for a in g}
         n = len(self.groups)
         self.idx = node % n  # which phase is being served
         self.phase = "GREEN"  # GREEN, YELLOW or ALLRED
-        self.elapsed = float((node * 3) % int(cfg.base_green))
+        self.elapsed = float((node * 7) % int(cfg.base_green))  # desynchronise neighbouring junctions
         self.planned = cfg.base_green
         self.extended_by = 0.0
         self.reason = "BASE"
@@ -287,7 +297,7 @@ class IntersectionController:
             if self._acc >= self.cfg.decision_period:
                 self._acc = 0.0
                 self._decide(now)
-        if self.elapsed >= self.planned:
+        if self.elapsed >= max(self.planned, self.cfg.min_green):
             self.phase, self.elapsed = "YELLOW", 0.0
 
     def _advance(self, now: float) -> None:
@@ -300,6 +310,7 @@ class IntersectionController:
         self.phase, self.elapsed, self.extended_by, self.reason = "GREEN", 0.0, 0.0, "BASE"
         self._became_red[self.idx] = math.inf
         self.planned, why = self.coord.plan_green(self.node, self.idx, now)
+        self.planned = max(self.planned, self.cfg.min_green)
         if self.coord.adaptive and abs(self.planned - self.cfg.base_green) >= 3.0:
             self.reason = "SPLIT_ADJUST"
             if abs(self.planned - self.cfg.base_green) >= 7.0:  # keep the log readable
@@ -318,14 +329,15 @@ class IntersectionController:
         slow = coord.slow_bus_group(cur)
         others = [(gi, g) for gi, g in enumerate(self.groups) if gi != self.idx]
 
-        # 1. Local optimisation: a slow bus near the stop line earns more green.
+        # 1. Local optimisation: a slow bus in the detection window earns more green.
         if slow is not None and now >= self._cooldown_until and self.remaining < cfg.ext_remaining:
-            want = cfg.ext_gain * (1.0 - slow.speed / (cfg.v_slow_frac * slow.free_speed))
+            ratio = slow.speed / slow.free_speed
+            want = cfg.ext_gain * (1.0 - ratio / cfg.v_slow_frac)
             self._extend(
                 now,
                 want,
                 "LOCAL_EXTEND",
-                f"{slow.bus_id} at {slow.speed:.1f} m/s, {slow.dist_to_next_node:.0f} m from line",
+                f"bus {slow.bus_id} L{slow.line} at {slow.speed * 3.6:.0f} km/h, {slow.dist_to_next_node:.0f} m from line",
             )
 
         # 2. Feed-forward: forecasts for buses that have not arrived yet.
@@ -339,7 +351,7 @@ class IntersectionController:
                     now,
                     cfg.pred_ext,
                     "PREDICTIVE_EXTEND",
-                    f"forecast for {f.source_bus}: density {f.predicted_density:.2f}, ETA {until:.0f}s, "
+                    f"forecast for L{f.line} {f.source_bus}: +{f.predicted_delay:.0f}s delay, ETA {until:.0f}s, "
                     f"conf {f.confidence:.2f}",
                 )
                 break
@@ -356,8 +368,8 @@ class IntersectionController:
                         self.events.add(
                             now,
                             "PREDICTIVE_SWITCH",
-                            f"{name} green cut short: forecast dense traffic ({f.predicted_density:.2f}) "
-                            f"for {f.source_bus} on {coord.label_group(g)} in {until:.0f}s",
+                            f"{name} green cut short: forecast +{f.predicted_delay:.0f}s delay for L{f.line} "
+                            f"{f.source_bus} on {coord.label_group(g)} in {until:.0f}s",
                             node=self.node,
                         )
                         self.planned = self.elapsed

@@ -2,17 +2,19 @@
 
 No network is involved; `TelemetryBus` is an in-process pub/sub with a bounded ring
 buffer. It stands in for a cheap, high-rate AVL (automatic vehicle location) feed.
+Every bus runs strictly along the edge sequence of its public line.
 """
 
 from __future__ import annotations
 
+import math
 import random
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 
 from .config import Config
-from .network import CityGrid
+from .network import RoadNetwork
 from .traffic_model import TrafficModel, Vehicle
 
 
@@ -20,18 +22,20 @@ from .traffic_model import TrafficModel, Vehicle
 class BusTelemetry:
     bus_id: str
     t: float
-    x: float
-    y: float
+    x: float  # metres east of the map centre
+    y: float  # metres north of the map centre
     segment_id: int
     dist_to_next_node: float  # m to the stop line of the next intersection
     speed: float  # m/s
-    free_speed: float  # m/s
+    free_speed: float  # m/s: the speed limit of the current edge
     delay: float  # accumulated seconds beyond the free-flow schedule
+    line: str = ""  # public line number, e.g. "28"
+    leg: int = 0  # position along the line's edge list
 
     def format(self) -> str:
         return (
-            f"{self.bus_id} ({self.x:5.0f},{self.y:5.0f}) seg{self.segment_id:<2d} "
-            f"d={self.dist_to_next_node:5.1f}m v={self.speed:4.1f}m/s delay={self.delay:5.1f}s"
+            f"{self.bus_id} L{self.line:<3s} seg{self.segment_id:<4d} d={self.dist_to_next_node:5.0f}m "
+            f"v={self.speed * 3.6:4.0f}km/h delay={self.delay:5.0f}s"
         )
 
 
@@ -56,62 +60,24 @@ class TelemetryBus:
         return list(self.history)[-n:]
 
 
-def _rect_path(grid: CityGrid, r0: int, c0: int, r1: int, c1: int, clockwise: bool) -> list[int]:
-    n = grid.cfg.cols
-    nodes = (
-        [r0 * n + c for c in range(c0, c1)]
-        + [r * n + c1 for r in range(r0, r1)]
-        + [r1 * n + c for c in range(c1, c0, -1)]
-        + [r * n + c0 for r in range(r1, r0, -1)]
-    )
-    return nodes if clockwise else [nodes[0]] + nodes[:0:-1]
-
-
-def _line_path(grid: CityGrid, a: tuple[int, int], b: tuple[int, int]) -> list[int]:
-    """Out-and-back along a row or column; the turnaround uses the opposite carriageway."""
-    n = grid.cfg.cols
-    (r0, c0), (r1, c1) = a, b
-    steps = max(abs(r1 - r0), abs(c1 - c0))
-    dr = (r1 > r0) - (r1 < r0)
-    dc = (c1 > c0) - (c1 < c0)
-    out = [(r0 + dr * i) * n + (c0 + dc * i) for i in range(steps + 1)]
-    return out + out[-2:0:-1]
-
-
-def default_routes(grid: CityGrid) -> list[list[int]]:
-    """Node cycles covering the perimeter, inner ring, rows, columns and diagonals-ish loops."""
-    R, C = grid.rows - 1, grid.cols - 1
-    node_cycles = [
-        _rect_path(grid, 0, 0, R, C, True),
-        _rect_path(grid, 0, 0, R, C, False),
-        _rect_path(grid, 1, 1, R - 1, C - 1, True),
-        _rect_path(grid, 1, 1, R - 1, C - 1, False),
-        _line_path(grid, (1, 0), (1, C)),
-        _line_path(grid, (R - 1, 0), (R - 1, C)),
-        _line_path(grid, (0, 1), (R, 1)),
-        _line_path(grid, (0, C - 1), (R, C - 1)),
-        _rect_path(grid, 0, 1, R, C - 1, True),
-    ]
-    routes = []
-    for cycle in node_cycles:
-        routes.append([grid.segment_between(cycle[i], cycle[(i + 1) % len(cycle)]) for i in range(len(cycle))])
-    return routes
-
-
 class BusFleet:
     """The transit fleet. Buses live in the traffic model; this class publishes their telemetry."""
 
-    def __init__(self, grid: CityGrid, cfg: Config, rng: random.Random, world: TrafficModel, bus: TelemetryBus):
-        self.grid, self.cfg, self.world, self.api = grid, cfg, world, bus
-        routes = default_routes(grid)
+    def __init__(self, net: RoadNetwork, cfg: Config, rng: random.Random, world: TrafficModel, bus: TelemetryBus):
+        self.net, self.cfg, self.world, self.api = net, cfg, world, bus
         n = 0
-        for route in routes:
-            length = len(route) * cfg.block_length
-            for k in range(cfg.buses_per_route):
-                # Spread the buses of one route evenly around the loop, with a little jitter.
-                offset = (k / cfg.buses_per_route) * length + rng.uniform(0, 40)
-                leg, pos = int(offset // cfg.block_length) % len(route), offset % cfg.block_length
-                world.add_bus(f"B{n:02d}", route, leg, pos)
+        for line in net.routes:
+            lengths = [net.segments[s].length for s in line.edges]
+            total = sum(lengths)
+            count = max(2, min(cfg.max_buses_per_line, round(total / cfg.bus_headway_m)))
+            for k in range(count):
+                # Spread the buses of one line evenly along its loop, with a little jitter.
+                offset = (k / count) * total + rng.uniform(0, 40)
+                leg, pos = 0, offset
+                while pos >= lengths[leg]:
+                    pos -= lengths[leg]
+                    leg = (leg + 1) % len(lengths)
+                world.add_bus(f"B{n:02d}", line.ref, line.edges, leg, pos)
                 n += 1
 
     @property
@@ -122,11 +88,16 @@ class BusFleet:
         """Publish one telemetry record per bus (a high-rate AVL feed)."""
         out: list[BusTelemetry] = []
         for b in self.world.buses:
-            seg = self.grid.segments[b.seg]
-            x, y = self.grid.position(seg.id, b.pos)
+            seg = self.net.segments[b.seg]
+            x, y, _, _ = self.net.position(seg.id, b.pos)
             rec = BusTelemetry(
-                b.id, now, x, y, seg.id, max(0.0, seg.stop_pos - b.pos), b.v, self.cfg.free_speed, b.delay
-            )
+                b.id, now, x, y, seg.id, max(0.0, seg.stop_pos - b.pos), b.v, seg.speed_limit, b.delay,
+                line=b.line or "", leg=b.leg,
+            )  # fmt: skip
             self.api.publish(rec)
             out.append(rec)
         return out
+
+
+def route_length(net: RoadNetwork, edges: list[int]) -> float:
+    return math.fsum(net.segments[s].length for s in edges)

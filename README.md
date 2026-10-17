@@ -1,6 +1,8 @@
-# Smart City Traffic Demo
+# Smart City Traffic Demo: Iași
 
-A visual demo of city-wide adaptive traffic-signal control. Cars and buses share the roads of a 4x4 city. Opposite streets always show the same light (N+S green together, then E+W; at a T-junction the two through streets, then the stem), with yellow and all-red between phases, and vehicles stop at a stop line before the junction on red. The buses stream telemetry (position, speed, delay); the controllers use it to extend green where buses slow down, throttle releases into congested neighbours, and pre-adjust cycles using an online-learned forecast of what each bus will meet next.
+A visual demo of adaptive traffic-signal control on the **real road network of central Iași, Romania** (Copou, Bd. Independenței, Piața Unirii, Podu Roș, Tudor Vladimirescu, Păcurari), with cars and buses on real streets and **real CTP Iași bus lines** from OpenStreetMap.
+
+Opposite streets share a light (N+S green together, then E+W; at a T-junction the through street, then the stem), with SUMO-style safety timings: at least 7 s of green, a 3 s yellow and a 2 s all-red before the conflicting phase. Vehicles stop at a stop line before the junction on red. The buses stream telemetry; **virtual detection loops** (50 / 150 / 300 m before every stop line) turn it into congestion estimates; the controllers extend green where buses crawl, throttle releases toward overloaded downstream junctions, and pre-adjust cycles using an online-learned forecast of what each bus will meet along the rest of its route.
 
 ![demo](docs/demo.png)
 
@@ -12,23 +14,32 @@ pip install -r requirements.txt
 python -m smartcity.main --incident-at 60     # interactive window
 ```
 
-| key | action |
+| key / mouse | action |
 |---|---|
+| wheel, drag | zoom about the cursor, pan |
+| `F`, `+` `-`, arrows | fit the map, zoom, pan |
 | `B` | toggle adaptive control / fixed-timer baseline |
-| `I` | stall a vehicle on the central lane (incident) |
+| `I` | stall a vehicle on the busiest bus corridor (incident) |
 | `Space` | pause |
 | `1` `2` `4` `8` | simulation speed |
-| `H` | cycle heat layer: off / true link load / load estimated from buses |
+| `H` | cycle heat layer: off / true edge occupancy / load estimated from buses |
+| `L` | show or hide the CTP line corridors |
 | `R` | reset |
 | `Q` | quit |
 
-Other modes: `--fixed` (start on fixed timers), `--compare` (headless fixed vs adaptive table), `--screenshot FILE --seconds N`.
+Other options: `--map grid` (a small synthetic city), `--fixed` (start on fixed timers), `--demand 0.08` (cars per second entering at each gate, a crude rush hour), `--compare` (headless fixed vs adaptive table), `--screenshot FILE --seconds N`.
 
 ## What you are looking at
 
-- **Map:** roads, a junction box at every intersection, a coloured light bar at every stop line (green / yellow / red), small blue cars and long buses coloured by speed. Rings flash where the algorithm overrides a timer; cyan diamonds mark AI forecasts of dense traffic; a red X marks the stalled vehicle (incident).
-- **Right panel:** the mock API stream, AI predictions (model, error, upcoming forecasts), and the log of overrides of the standard timer.
+- **Map:** asphalt-grey roads, a neon stop-line bar at every approach of a signalised junction (green / yellow / red), small blue cars, buses coloured red-amber-lime by speed with their line number, faint coloured corridors for the 8 simulated CTP lines (19, 28, 36, 41, 20, 42, 43, 47), landmark labels. Rings flash where the algorithm adjusts a cycle; cyan diamonds mark AI forecasts of delay; a red X marks the stalled vehicle.
+- **Dashboard:** live bus telemetry (ID, line, speed, delay, AI-predicted extra delay ahead), AI predictions along each route, the busiest virtual detection loops, and the log of automated cycle adjustments.
+
+## Data
+
+`scripts/fetch_iasi.py` downloads the drive network with OSMnx and the CTP bus relations from Overpass, crops to the central spine, merges junction clusters and writes `data/iasi_core.json` and `data/iasi_routes.json` (committed, so the app runs offline). Rebuild with `python scripts/fetch_iasi.py --refresh`.
+
+Map data (c) OpenStreetMap contributors, ODbL. OSM bus relations are volunteer-maintained and may differ from CTP's current timetable; see the limits in ARCHITECTURE.md.
 
 ## Docs and tests
 
-[ARCHITECTURE.md](ARCHITECTURE.md) explains the design, the maths and the measured results, including where it does not help. `pytest` runs the headless test suite.
+[ARCHITECTURE.md](ARCHITECTURE.md) explains the design, the maths and the measured results, including where it does not help. [docs/REFACTORING_PLAN.md](docs/REFACTORING_PLAN.md) records how the earlier grid demo was moved onto the real map. `pytest` runs the headless test suite.

@@ -1,5 +1,5 @@
 # =============================================================================
-# Smart City Traffic Demo - dependencies
+# Smart City Traffic Demo (Iași) - dependencies
 # =============================================================================
 # TARGET PYTHON VERSION: Python 3.14 (3.14.8)
 #
@@ -25,6 +25,15 @@ pygame-ce>=2.5,<3
 
 # Ridge regression, vectorised statistics for the prediction module
 numpy>=1.26,<3
+
+# Road graph: routing, shortest paths and neighbour traversal (used by the simulation at run time)
+networkx>=3.2,<4
+
+# Real-map data pipeline: `python scripts/fetch_iasi.py` downloads the Iași drive network and CTP bus
+# routes from OpenStreetMap, merges junction clusters and writes data/*.json. The simulation itself
+# only reads those committed files, so osmnx and shapely are needed only to rebuild the dataset.
+osmnx>=2.0,<3
+shapely>=2.0,<3
 
 # Tests for the headless simulation core
 pytest>=8,<9

@@ -6,7 +6,10 @@
       "type": "debugpy",
       "request": "launch",
       "module": "smartcity.main",
-      "args": ["--incident-at", "60"],
+      "args": [
+        "--incident-at",
+        "60"
+      ],
       "justMyCode": true
     },
     {
@@ -14,7 +17,24 @@
       "type": "debugpy",
       "request": "launch",
       "module": "smartcity.main",
-      "args": ["--fixed", "--incident-at", "60"],
+      "args": [
+        "--fixed",
+        "--incident-at",
+        "60"
+      ],
+      "justMyCode": true
+    },
+    {
+      "name": "Demo (synthetic grid)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "smartcity.main",
+      "args": [
+        "--map",
+        "grid",
+        "--incident-at",
+        "60"
+      ],
       "justMyCode": true
     },
     {
@@ -22,7 +42,9 @@
       "type": "debugpy",
       "request": "launch",
       "module": "smartcity.main",
-      "args": ["--compare"],
+      "args": [
+        "--compare"
+      ],
       "justMyCode": true
     },
     {
@@ -30,8 +52,22 @@
       "type": "debugpy",
       "request": "launch",
       "module": "pytest",
-      "args": ["${file}", "-x", "-q"],
+      "args": [
+        "${file}",
+        "-x",
+        "-q"
+      ],
       "justMyCode": false
+    },
+    {
+      "name": "Rebuild Ia\u0219i dataset",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/fetch_iasi.py",
+      "args": [
+        "--refresh"
+      ],
+      "justMyCode": true
     }
   ]
 }
