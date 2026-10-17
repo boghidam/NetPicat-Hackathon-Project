@@ -1,0 +1,33 @@
+# =============================================================================
+# Smart City Traffic Demo - dependencies
+# =============================================================================
+# TARGET PYTHON VERSION: Python 3.14 (3.14.8)
+#
+# Setup (macOS/Linux):
+#   python3.14 -m venv .venv
+#   source .venv/bin/activate
+#   pip install -r requirements.txt
+#
+# Recommended VS Code extensions (testing & debugging):
+#   ms-python.python                  - interpreter selection, pytest test explorer
+#   ms-python.vscode-pylance          - type checking and IntelliSense
+#   ms-python.debugpy                 - breakpoints in the pygame loop and in
+#                                       controller/predictor logic
+#   charliermarsh.ruff                - linting and formatting
+#   ms-python.mypy-type-checker       - static checks for the dataclass-heavy core
+#   eamodio.gitlens                   - history/blame while tuning parameters
+#   yzhang.markdown-all-in-one        - preview ARCHITECTURE.md
+#   bierner.markdown-mermaid          - render the Mermaid diagrams in ARCHITECTURE.md
+# =============================================================================
+
+# Visual simulation (maintained pygame fork with current wheels)
+pygame-ce>=2.5,<3
+
+# Ridge regression, vectorised statistics for the prediction module
+numpy>=1.26,<3
+
+# Tests for the headless simulation core
+pytest>=8,<9
+
+# Linting / formatting
+ruff>=0.6

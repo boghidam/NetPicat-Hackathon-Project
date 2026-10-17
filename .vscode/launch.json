@@ -1,0 +1,37 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Demo (adaptive)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "smartcity.main",
+      "args": ["--incident-at", "60"],
+      "justMyCode": true
+    },
+    {
+      "name": "Demo (fixed-timer baseline)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "smartcity.main",
+      "args": ["--fixed", "--incident-at", "60"],
+      "justMyCode": true
+    },
+    {
+      "name": "Headless comparison",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "smartcity.main",
+      "args": ["--compare"],
+      "justMyCode": true
+    },
+    {
+      "name": "pytest (current file)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["${file}", "-x", "-q"],
+      "justMyCode": false
+    }
+  ]
+}
