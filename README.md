@@ -2,7 +2,7 @@
 
 A visual demo of adaptive traffic-signal control on the **real road network of central Iași, Romania** (Copou, Bd. Independenței, Piața Unirii, Podu Roș, Tudor Vladimirescu, Păcurari), with cars and buses on real streets and **real CTP Iași bus lines** from OpenStreetMap.
 
-Opposite streets share a light (N+S green together, then E+W; at a T-junction the through street, then the stem), with SUMO-style safety timings: at least 7 s of green, a 3 s yellow and a 2 s all-red before the conflicting phase. Vehicles stop at a stop line before the junction on red. The buses stream telemetry; **virtual detection loops** (50 / 150 / 300 m before every stop line) turn it into congestion estimates; the controllers extend green where buses crawl, throttle releases toward overloaded downstream junctions, and pre-adjust cycles using an online-learned forecast of what each bus will meet along the rest of its route.
+Opposite streets share a light (N+S green together, then E+W; at a T-junction the through street, then the stem), with SUMO-style safety timings: at least 7 s of green, a 3 s yellow and a 2 s all-red before the conflicting phase. Vehicles stop at a stop line before the junction on red. The buses stream telemetry; **virtual detection loops** (50 / 150 / 300 m before every stop line) turn it into congestion estimates; only the buses are observed, never the cars, so a green is **never cut short**: once per red-green cycle each junction checks how far the buses heading for it travelled, and lengthens its green only if they covered very little distance. Releases toward overloaded downstream junctions are throttled, and an online-learned forecast of what each bus will meet along the rest of its route can lengthen a green before the bus arrives.
 
 ![demo](docs/demo.png)
 
@@ -31,7 +31,7 @@ Other options: `--map grid` (a small synthetic city), `--fixed` (start on fixed 
 
 ## What you are looking at
 
-- **Map:** asphalt-grey roads, a neon stop-line bar at every approach of a signalised junction (green / yellow / red), small blue cars, buses coloured red-amber-lime by speed with their line number, faint coloured corridors for the 8 simulated CTP lines (19, 28, 36, 41, 20, 42, 43, 47), landmark labels. Rings flash where the algorithm adjusts a cycle; cyan diamonds mark AI forecasts of delay; a red X marks the stalled vehicle.
+- **Map:** asphalt-grey roads, a neon stop-line bar at every approach of a signalised junction (green / yellow / red), small blue cars, buses coloured red-amber-lime by speed with their line number, faint coloured corridors for the 8 simulated CTP lines (19, 28, 36, 41, 20, 42, 43, 47), landmark labels. Rings flash where the algorithm lengthens a green or throttles a release; cyan diamonds mark AI forecasts of delay; a red X marks the stalled vehicle.
 - **Dashboard:** live bus telemetry (ID, line, speed, delay, AI-predicted extra delay ahead), AI predictions along each route, the busiest virtual detection loops, and the log of automated cycle adjustments.
 
 ## Data

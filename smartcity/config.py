@@ -53,28 +53,20 @@ class Config:
     est_stale_tau: float = 90.0  # s: confidence decay time constant
     est_prior_load: float = 0.25  # load assumed for segments no bus has seen recently
 
-    # --- local optimisation ---------------------------------------------
-    v_slow_frac: float = 0.5  # bus slower than this fraction of free speed => slow
+    # --- sensing and green extension ------------------------------------------
+    # Only buses are observed. Greens are never shortened; they are extended only when a bus that is
+    # approaching a light covered very little distance during the light's last red-green cycle.
     loop_windows: tuple[float, float, float] = (50.0, 150.0, 300.0)  # m before the stop line: virtual detection loops
-    d_trigger: float = 150.0  # m: a slow bus inside this window counts as congestion at the line
-    ext_gain: float = 8.0  # s: extension = gain * (1 - speed / v_slow)
-    ext_remaining: float = 4.0  # only extend when this little green remains
-    ext_cooldown: float = 3.0
-    early_switch_margin: float = 0.3  # score gap that justifies ending a green early
+    cycle_window: float = 300.0  # m: buses within this road distance of a stop line are checked each cycle
+    cycle_low_progress: float = 0.3  # "low": less than this share of the free-flow distance per cycle
+    cycle_ext_max: float = 12.0  # s: the longest extension one cycle check can add (scaled by the shortfall)
+    min_cycle: float = 20.0  # s: shorter gaps between greens are not judged
 
     # --- global optimisation --------------------------------------------
     rho_gate: float = 0.65  # downstream load above which releases are metered
     rho_block: float = 0.85  # downstream load at which an approach is released at zero rate
-    w_pressure: float = 0.35
-    w_bus_delay: float = 0.25
-    w_forecast: float = 0.20
-    w_age: float = 0.10
-    w_downstream: float = 0.30
-    age_full: float = 60.0  # s of red at which the age term saturates
-    split_eps: float = 0.15  # keeps splits at the base timer when scores are all low
-    split_deadband: float = 0.15  # score share must differ from an even split by this much to change greens
     budget_window: float = 60.0  # s
-    budget_seconds: float = 90.0  # max total extension seconds per window across the grid
+    budget_seconds: float = 90.0  # max total extension seconds per window across the network
     neighbour_window: float = 20.0
     neighbour_damping: float = 0.5
 
@@ -88,8 +80,8 @@ class Config:
     pred_hops: int = 3  # links ahead along the bus's route that each forecast covers
     pred_hop_decay: float = 0.6  # confidence multiplier per extra hop
     pred_decay_tau: float = 40.0  # s: how quickly a forecast's weight fades with ETA
-    lead_window: float = 10.0  # s before ETA in which the target pre-adjusts
-    pred_density_min: float = 0.2  # predicted density that justifies pre-adjusting
+    pred_horizon: float = 30.0  # s: a forecast for a bus due within this long can extend the green that is starting
+    pred_density_min: float = 0.2  # predicted density that counts as predicted low progress
     pred_ext: float = 6.0  # s of predictive green extension
 
     # --- incident -------------------------------------------------------

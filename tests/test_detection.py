@@ -90,11 +90,22 @@ def test_no_buses_means_no_reading(loops_and_net):
     assert loops.reading(road(net, 4, 5)) is None
 
 
-def test_slowest_bus_in_the_150m_window_is_reported_only_when_crawling(loops_and_net):
+def test_buses_near_returns_buses_heading_for_the_approach_within_the_window(loops_and_net):
     loops, net = loops_and_net
-    seg = road(net, 4, 5)
-    read(loops, tel(seg, 100.0, 2.0, "SLOW"), tel(seg, 120.0, 12.0, "FAST"))
-    assert loops.reading(seg).slowest.bus_id == "SLOW"
-    loops2 = DetectionLoops(net, Config())
-    read(loops2, tel(seg, 100.0, 12.0))
-    assert loops2.reading(seg).slowest is None
+    route = net.route_by_ref["G5"]  # row 1, out and back: 4>5, 5>6, 6>7, 7>6, 6>5, 5>4
+    on_route, next_leg = route.edges[0], route.edges[1]  # 4>5 then 5>6
+    other = road(net, 5, 1)  # an approach this line never uses after 4>5
+    rec = BusTelemetry("B01", 0.0, 0.0, 0.0, on_route, 60.0, 5.0, 13.9, 0.0, line="G5", leg=0)
+    loops.observe(rec)
+    assert loops.buses_near([next_leg], 300.0) == {"B01": (rec, next_leg)}  # 60 + 14 + 186 = 260 m away
+    assert loops.buses_near([next_leg], 200.0) == {}  # outside a 200 m window
+    assert loops.buses_near([other], 300.0) == {}  # its route does not continue that way
+    assert loops.buses_near([on_route], 100.0) == {"B01": (rec, on_route)}  # on the approach itself
+
+
+def test_buses_near_ignores_buses_of_unknown_lines_on_earlier_edges(loops_and_net):
+    loops, net = loops_and_net
+    rec = BusTelemetry("B02", 0.0, 0.0, 0.0, road(net, 4, 5), 60.0, 5.0, 13.9, 0.0, line="??", leg=0)
+    loops.observe(rec)
+    assert loops.buses_near([road(net, 5, 6)], 300.0) == {}
+    assert road(net, 4, 5) in {a for _, a in loops.buses_near([road(net, 4, 5)], 300.0).values()}

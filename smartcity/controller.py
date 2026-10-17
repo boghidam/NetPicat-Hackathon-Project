@@ -5,11 +5,18 @@ opposite are green together (and red together), an unpaired street has a phase o
 SUMO-style safety rules apply: a green never lasts less than `min_green` (7 s), then comes a 3 s
 yellow and a 2 s all-red clearance before the conflicting phase starts.
 
-The coordinator is where the global optimisation lives. It turns bus-derived congestion
-estimates (per-link EWMA plus virtual detection loops) and AI forecasts into per-edge loads, and
-from those, walking the road graph to the *junction at the end of each release*, into (a) a
-throttle on how fast each approach may release cars, (b) dynamic phase scores that size each green
-and can end one early, and (c) a grid-wide budget on green extensions.
+Only the buses are observed, never the cars, so a green is **never ended early**. It can only be
+*extended*, and only on evidence from buses:
+
+* at the start of every green (once per red-green cycle of that light) the controller asks how far
+  each bus heading for it covered during the cycle that just ended; if even the worst-held bus got
+  less than a small share of the free-flow distance, this green is lengthened;
+* a forecast that a bus about to arrive will make low progress (feed-forward from the AI module)
+  can lengthen the green that is starting before the bus has even been seen to stall.
+
+The coordinator also holds the network-wide pieces: edge and junction loads (walking the road graph
+to the junction at the end of each release), a throttle on how fast each approach releases cars so a
+bottleneck is not simply moved downstream, and a budget on extensions.
 """
 
 from __future__ import annotations
@@ -25,19 +32,20 @@ from .events import EventLog
 from .mock_api import BusTelemetry
 from .network import RoadNetwork
 from .predictor import Forecast, PostIntersectionPredictor
+from .progress import RouteProgress
 
 JUNCTION_WEIGHT = 0.85  # how much of a downstream junction's congestion counts against releasing into it
 
 
 @dataclass(frozen=True)
-class Score:
-    seg_id: int
-    pressure: float
-    bus_delay: float
-    forecast: float
-    downstream_penalty: float
-    age_bonus: float
-    total: float
+class Evidence:
+    """The worst-held bus heading for a junction, and how little it moved during the last cycle."""
+
+    bus: BusTelemetry
+    approach: int
+    travelled: float  # m along its route during the cycle
+    expected: float  # m it would have covered at the speed limit
+    share: float  # travelled / expected
 
 
 class NetworkCoordinator:
@@ -48,17 +56,19 @@ class NetworkCoordinator:
         estimator: CongestionEstimator,
         predictor: PostIntersectionPredictor,
         loops: DetectionLoops,
+        progress: RouteProgress,
         events: EventLog,
         adaptive: bool = True,
     ):
         self.net, self.cfg = net, cfg
-        self.estimator, self.predictor, self.loops, self.events = estimator, predictor, loops, events
+        self.estimator, self.predictor, self.loops, self.progress = estimator, predictor, loops, progress
+        self.events = events
         self.adaptive = adaptive
         self.controllers: dict[int, IntersectionController] = {}
         n = len(net.segments)
-        self.est_load = [cfg.est_prior_load] * n  # bus telemetry: per-link EWMA and detection loops
+        self.est_load = [cfg.est_prior_load] * n  # bus telemetry: per-edge EWMA and detection loops
         self.fc_load = [0.0] * n  # from AI forecasts only
-        self.load = [cfg.est_prior_load] * n  # what the controllers act on
+        self.load = [cfg.est_prior_load] * n  # what the throttle acts on
         self.junction_load = [cfg.est_prior_load] * len(net.nodes)  # congestion at the end of each approach set
         self.dload = [0.0] * n  # worst downstream load an approach would release into
         self._worst = [-1] * n
@@ -163,59 +173,35 @@ class NetworkCoordinator:
     def release_factor(self, seg_id: int) -> float:
         return self.throttle[seg_id] if self.adaptive else 1.0
 
-    # -- sensing ---------------------------------------------------------------
-    def slow_bus(self, seg_id: int) -> BusTelemetry | None:
-        """The slowest bus inside the 150 m detection window of an approach, if it is crawling."""
-        reading = self.loops.reading(seg_id)
-        return reading.slowest if reading is not None else None
+    # -- evidence from buses ------------------------------------------------------
+    def cycle_evidence(self, group: list[int], span: float, now: float) -> Evidence | None:
+        """The bus heading for this phase that covered the smallest share of free-flow distance in `span` s.
+
+        Only buses within `cycle_window` metres of a stop line of the phase, whose own route continues
+        onto it, are considered, and only if they are held to under `cycle_low_progress`.
+        """
+        cfg = self.cfg
+        worst: Evidence | None = None
+        for bus_id, (tel, approach) in self.loops.buses_near(group, cfg.cycle_window).items():
+            done = self.progress.travelled(bus_id, now, span)
+            if done is None:
+                continue  # not observed for a whole cycle yet
+            expected = span * tel.free_speed
+            share = done / expected if expected > 0 else 1.0
+            if share < cfg.cycle_low_progress and (worst is None or share < worst.share):
+                worst = Evidence(tel, approach, done, expected, share)
+        return worst
 
     def forecasts_for(self, seg_id: int, now: float) -> list[Forecast]:
         return sorted((f for f in self.predictor.incoming(seg_id, now) if f.eta >= now), key=lambda f: f.eta)
 
-    def score(self, seg_id: int, now: float) -> Score:
-        cfg = self.cfg
-        seg = self.net.segments[seg_id]
-        pressure = max(0.0, self.est_load[seg_id] - 0.5 * self.dload[seg_id])
-        reading = self.loops.reading(seg_id)
-        bus_delay = reading.delay_score if reading is not None else 0.0
-        forecast = self.fc_load[seg_id]
-        ctl = self.controllers.get(seg.to_node)
-        age = min(1.0, (ctl.red_time(seg_id, now) if ctl else 0.0) / cfg.age_full)
-        total = (
-            cfg.w_pressure * pressure
-            + cfg.w_bus_delay * bus_delay
-            + cfg.w_forecast * forecast
-            + cfg.w_age * age
-            - cfg.w_downstream * self.dload[seg_id]
-        )
-        return Score(
-            seg_id, pressure, bus_delay, forecast, cfg.w_downstream * self.dload[seg_id], cfg.w_age * age, total
-        )
-
-    # -- phases are groups of opposite approaches -----------------------------
-    def group_score(self, group: list[int], now: float) -> Score:
-        return max((self.score(a, now) for a in group), key=lambda sc: sc.total)
-
-    def slow_bus_group(self, group: list[int]) -> BusTelemetry | None:
-        slow = [t for a in group if (t := self.slow_bus(a)) is not None]
-        return min(slow, key=lambda t: t.speed, default=None)
-
     def forecasts_for_group(self, group: list[int], now: float) -> list[Forecast]:
         return sorted((f for a in group for f in self.forecasts_for(a, now)), key=lambda f: f.eta)
 
-    def plan_green(self, node: int, gi: int, now: float) -> tuple[float, str]:
-        """Green duration for the phase that is about to start, and a note on why it differs."""
+    def downstream_openness(self, approach: int) -> float:
+        """1 when the edges an approach releases into are clear, 0 when they are blocked (no point extending)."""
         cfg = self.cfg
-        if not self.adaptive:
-            return cfg.base_green, ""
-        groups = self.controllers[node].groups
-        weights = [max(0.0, self.group_score(g, now).total) + cfg.split_eps for g in groups]
-        share = weights[gi] / sum(weights)
-        even = 1.0 / len(groups)
-        if abs(share - even) < cfg.split_deadband:
-            return cfg.base_green, ""  # scores too close to call: keep the standard timer
-        planned = max(cfg.min_green, min(cfg.max_green, cfg.base_green * len(groups) * share))
-        return planned, f"score share {share:.0%}"
+        return 1.0 - max(0.0, min(1.0, (self.dload[approach] - cfg.rho_gate) / (cfg.rho_block - cfg.rho_gate)))
 
     # -- extension budget ------------------------------------------------------
     def request_extension(self, node: int, seconds: float, now: float) -> float:
@@ -241,7 +227,7 @@ class NetworkCoordinator:
 
 
 class IntersectionController:
-    """Phase signal: opposite streets share a green; standard timer plus adaptive overrides."""
+    """Phase signal: opposite streets share a green; the standard timer, extended on bus evidence only."""
 
     def __init__(self, node: int, net: RoadNetwork, cfg: Config, coord: NetworkCoordinator, events: EventLog):
         self.node, self.net, self.cfg, self.coord, self.events = node, net, cfg, coord, events
@@ -254,12 +240,8 @@ class IntersectionController:
         self.elapsed = float((node * 7) % int(cfg.base_green))  # desynchronise neighbouring junctions
         self.planned = cfg.base_green
         self.extended_by = 0.0
-        self.reason = "BASE"
-        self._became_red = {gi: (0.0 if gi != self.idx else math.inf) for gi in range(n)}
-        self._cooldown_until = 0.0
-        self._acc = 0.0
+        self._last_green = {self.idx: -self.elapsed}  # when each phase last turned green
         self._used_forecasts: set[int] = set()
-        self._next_override: int | None = None
 
     # -- queries -----------------------------------------------------------
     @property
@@ -272,130 +254,66 @@ class IntersectionController:
             return "R"
         return {"GREEN": "G", "YELLOW": "Y", "ALLRED": "R"}[self.phase]
 
-    def red_time(self, seg_id: int, now: float) -> float:
-        gi = self._group_of[seg_id]
-        return 0.0 if gi == self.idx else max(0.0, now - self._became_red[gi])
-
-    @property
-    def remaining(self) -> float:
-        return self.planned - self.elapsed
-
     # -- simulation step ---------------------------------------------------
     def step(self, now: float, dt: float) -> None:
         self.elapsed += dt
         if self.phase == "YELLOW":
             if self.elapsed >= self.cfg.yellow:
                 self.phase, self.elapsed = "ALLRED", 0.0
-                self._became_red[self.idx] = now
-            return
-        if self.phase == "ALLRED":
+        elif self.phase == "ALLRED":
             if self.elapsed >= self.cfg.all_red:
-                self._advance(now)
-            return
-        if self.coord.adaptive:
-            self._acc += dt
-            if self._acc >= self.cfg.decision_period:
-                self._acc = 0.0
-                self._decide(now)
-        if self.elapsed >= max(self.planned, self.cfg.min_green):
+                self._start_green(now)
+        elif self.elapsed >= self.planned:  # a green only ever ends when its (possibly extended) time is up
             self.phase, self.elapsed = "YELLOW", 0.0
 
-    def _advance(self, now: float) -> None:
-        n = len(self.groups)
-        nxt = (self.idx + 1) % n
-        if self._next_override is not None:
-            nxt = self._next_override
-        self._next_override = None
-        self.idx = nxt
-        self.phase, self.elapsed, self.extended_by, self.reason = "GREEN", 0.0, 0.0, "BASE"
-        self._became_red[self.idx] = math.inf
-        self.planned, why = self.coord.plan_green(self.node, self.idx, now)
-        self.planned = max(self.planned, self.cfg.min_green)
-        if self.coord.adaptive and abs(self.planned - self.cfg.base_green) >= 3.0:
-            self.reason = "SPLIT_ADJUST"
-            if abs(self.planned - self.cfg.base_green) >= 7.0:  # keep the log readable
-                self.events.add(
+    def _start_green(self, now: float) -> None:
+        self.idx = (self.idx + 1) % len(self.groups)
+        self.phase, self.elapsed, self.extended_by = "GREEN", 0.0, 0.0
+        self.planned = self.cfg.base_green  # the standard timer; never shorter
+        previous = self._last_green.get(self.idx)
+        self._last_green[self.idx] = now
+        if self.coord.adaptive:
+            self._review_buses(now, None if previous is None else now - previous)
+
+    # -- the per-cycle bus check ---------------------------------------------------
+    def _review_buses(self, now: float, cycle: float | None) -> None:
+        """Decide, once per red-green cycle of this light, whether to lengthen the green that is starting."""
+        cfg, coord, group = self.cfg, self.coord, self.current
+        if cycle is not None and cycle >= cfg.min_cycle:
+            ev = coord.cycle_evidence(group, cycle, now)
+            if ev is not None:
+                want = cfg.cycle_ext_max * (1.0 - ev.share / cfg.cycle_low_progress)
+                want *= coord.downstream_openness(ev.approach)  # no point extending into a jammed street
+                self._extend(
                     now,
-                    "SPLIT_ADJUST",
-                    f"{self.coord.label_group(self.current)} green {self.planned:.0f}s instead of "
-                    f"{self.cfg.base_green:.0f}s ({why})",
-                    node=self.node,
+                    want,
+                    "LOCAL_EXTEND",
+                    f"bus {ev.bus.bus_id} L{ev.bus.line} covered {ev.travelled:.0f} m in the last {cycle:.0f} s cycle "
+                    f"({ev.share:.0%} of free flow)",
                 )
-
-    # -- adaptive decisions ----------------------------------------------------
-    def _decide(self, now: float) -> None:
-        cfg, coord, cur = self.cfg, self.coord, self.current
-        name = coord.label_group(cur)
-        slow = coord.slow_bus_group(cur)
-        others = [(gi, g) for gi, g in enumerate(self.groups) if gi != self.idx]
-
-        # 1. Local optimisation: a slow bus in the detection window earns more green.
-        if slow is not None and now >= self._cooldown_until and self.remaining < cfg.ext_remaining:
-            ratio = slow.speed / slow.free_speed
-            want = cfg.ext_gain * (1.0 - ratio / cfg.v_slow_frac)
-            self._extend(
-                now,
-                want,
-                "LOCAL_EXTEND",
-                f"bus {slow.bus_id} L{slow.line} at {slow.speed * 3.6:.0f} km/h, {slow.dist_to_next_node:.0f} m from line",
-            )
-
-        # 2. Feed-forward: forecasts for buses that have not arrived yet.
-        for f in coord.forecasts_for_group(cur, now):
+        # Feed-forward: a bus due soon that is forecast to make low progress.
+        for f in coord.forecasts_for_group(group, now):
             if f.id in self._used_forecasts or f.predicted_density < cfg.pred_density_min or f.confidence < 0.3:
                 continue
-            until = f.eta - now
-            if until <= cfg.lead_window and self.remaining < until + 3.0:
+            if f.eta - now <= cfg.pred_horizon:
                 self._used_forecasts.add(f.id)
                 self._extend(
                     now,
                     cfg.pred_ext,
                     "PREDICTIVE_EXTEND",
-                    f"forecast for L{f.line} {f.source_bus}: +{f.predicted_delay:.0f}s delay, ETA {until:.0f}s, "
+                    f"forecast for L{f.line} {f.source_bus}: +{f.predicted_delay:.0f}s delay, ETA {f.eta - now:.0f}s, "
                     f"conf {f.confidence:.2f}",
                 )
                 break
 
-        if self.elapsed >= cfg.min_green and slow is None and self.remaining > 1.0:
-            for gi, g in others:  # a dense forecast on another street: serve it next
-                for f in coord.forecasts_for_group(g, now):
-                    if f.id in self._used_forecasts or f.predicted_density < cfg.pred_density_min or f.confidence < 0.3:
-                        continue
-                    until = f.eta - now
-                    if until <= cfg.lead_window:
-                        self._used_forecasts.add(f.id)
-                        self._next_override = gi
-                        self.events.add(
-                            now,
-                            "PREDICTIVE_SWITCH",
-                            f"{name} green cut short: forecast +{f.predicted_delay:.0f}s delay for L{f.line} "
-                            f"{f.source_bus} on {coord.label_group(g)} in {until:.0f}s",
-                            node=self.node,
-                        )
-                        self.planned = self.elapsed
-                        return
-
-            # 3. Dynamic weighting: end this green early if the next phase clearly needs it more.
-            nxt = self.groups[(self.idx + 1) % len(self.groups)]
-            mine, theirs = coord.group_score(cur, now), coord.group_score(nxt, now)
-            if theirs.total - mine.total >= cfg.early_switch_margin:
-                self.events.add(
-                    now,
-                    "EARLY_SWITCH",
-                    f"{name} green ended early: {coord.label_group(nxt)} score {theirs.total:.2f} vs {mine.total:.2f}",
-                    node=self.node,
-                )
-                self.planned = self.elapsed
-
     def _extend(self, now: float, seconds: float, kind: str, detail: str) -> None:
         room = self.cfg.max_green - self.planned
-        if room <= 0.5:
+        want = min(seconds, room)
+        if want < 1.0:
             return
-        granted = self.coord.request_extension(self.node, min(seconds, room), now)
-        self._cooldown_until = now + self.cfg.ext_cooldown
+        granted = self.coord.request_extension(self.node, want, now)
         if granted <= 0.0:
             return
         self.planned += granted
         self.extended_by += granted
-        self.reason = kind
         self.events.add(now, kind, f"{self.coord.label_group(self.current)} +{granted:.1f}s ({detail})", node=self.node)

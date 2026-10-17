@@ -31,7 +31,7 @@ SIGNAL = {"G": (57, 255, 20), "Y": (255, 225, 0), "R": (255, 23, 68)}  # neon
 CAR = (150, 205, 255)
 CAR_OUTLINE = (12, 18, 30)
 ROAD_WIDTH_M = {"primary": 11.0, "secondary": 10.0, "tertiary": 9.0}  # a lane each way plus a margin
-RING_KINDS = {"LOCAL_EXTEND", "PREDICTIVE_EXTEND", "PREDICTIVE_SWITCH", "THROTTLE", "EARLY_SWITCH"}
+RING_KINDS = {"LOCAL_EXTEND", "PREDICTIVE_EXTEND", "THROTTLE"}
 
 
 def lerp(a: tuple[int, int, int], b: tuple[int, int, int], k: float) -> tuple[int, int, int]:

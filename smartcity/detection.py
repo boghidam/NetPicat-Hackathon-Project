@@ -27,9 +27,6 @@ class LoopReading:
     moving: list[int] = field(default_factory=lambda: [0, 0, 0])  # buses still moving per window
     sum_ratio: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])  # their speed ratios
     queue_occupancy: float = 0.0  # how much of the approach edge a standing queue covers
-    slowest: BusTelemetry | None = None  # slowest bus inside the middle window
-    slowest_ratio: float = 1.0
-    delay_score: float = 0.0  # slowness of buses in the outer window, weighted by proximity
 
     def mean_ratio(self, i: int) -> float | None:
         return self.sum_ratio[i] / self.moving[i] if self.moving[i] else None
@@ -90,7 +87,6 @@ class DetectionLoops:
         A bus standing within `est_skip_end` of its own stop line is either waiting for its signal or
         pulling away from it, not reporting congestion, so (like the estimator) the loops ignore it.
         """
-        v_slow = self.cfg.v_slow_frac
         skip = self.cfg.est_skip_end
         w0, w1, w2 = self.windows
         readings: dict[int, LoopReading] = {}
@@ -117,10 +113,31 @@ class DetectionLoops:
                     seg = self.net.segments[target]
                     occ = min(1.0, (dist + self.cfg.bus_length) / max(1.0, seg.stop_pos)) if base == 0.0 else 1.0
                     r.queue_occupancy = max(r.queue_occupancy, occ)
-                if dist <= w1 and ratio < v_slow and ratio < r.slowest_ratio:
-                    r.slowest, r.slowest_ratio = tel, ratio
-                r.delay_score = max(r.delay_score, (1.0 - ratio) * (1.0 - 0.5 * dist / w2))
         self.readings = readings
 
     def reading(self, seg_id: int) -> LoopReading | None:
         return self.readings.get(seg_id)
+
+    def buses_near(self, approaches: list[int], window: float) -> dict[str, tuple[BusTelemetry, int]]:
+        """Buses within `window` metres of the stop line of any of these approaches and *heading for it*.
+
+        A bus on an earlier edge only counts if its own route really continues onto the approach
+        within the next few edges (the route table is public). Returns bus id -> (telemetry, approach).
+        """
+        wanted = set(approaches)
+        found: dict[str, tuple[BusTelemetry, int]] = {}
+        for tel in self.latest.values():
+            for target, base in self.feeds[tel.segment_id]:
+                if target in wanted and tel.dist_to_next_node + base <= window and self._heads_for(tel, target):
+                    found[tel.bus_id] = (tel, target)
+                    break
+        return found
+
+    def _heads_for(self, tel: BusTelemetry, target: int) -> bool:
+        if tel.segment_id == target:
+            return True
+        route = self.net.route_by_ref.get(tel.line)
+        if route is None:
+            return False
+        n = len(route.edges)
+        return any(route.edges[(tel.leg + k) % n] == target for k in range(1, 4))

@@ -10,9 +10,6 @@ OVERRIDE_KINDS = frozenset(
     {
         "LOCAL_EXTEND",
         "PREDICTIVE_EXTEND",
-        "PREDICTIVE_SWITCH",
-        "EARLY_SWITCH",
-        "SPLIT_ADJUST",
         "THROTTLE",
     }
 )

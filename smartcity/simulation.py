@@ -14,6 +14,7 @@ from .events import EventLog
 from .mock_api import BusFleet, TelemetryBus
 from .network import RoadNetwork
 from .predictor import PostIntersectionPredictor
+from .progress import RouteProgress
 from .traffic_model import TrafficModel
 
 
@@ -37,8 +38,9 @@ class Simulation:
         self.estimator = CongestionEstimator(self.net, cfg)
         self.predictor = PostIntersectionPredictor(self.net, cfg, self.events)
         self.loops = DetectionLoops(self.net, cfg)
+        self.progress = RouteProgress(self.net)
         self.coord = NetworkCoordinator(
-            self.net, cfg, self.estimator, self.predictor, self.loops, self.events, adaptive
+            self.net, cfg, self.estimator, self.predictor, self.loops, self.progress, self.events, adaptive
         )
         self.controllers = {
             n.id: IntersectionController(n.id, self.net, cfg, self.coord, self.events)
@@ -50,6 +52,7 @@ class Simulation:
         self.api.subscribe(self.estimator.on_telemetry)
         self.api.subscribe(self.predictor.on_telemetry)
         self.api.subscribe(self.coord.observe)
+        self.api.subscribe(self.progress.on_telemetry)
 
         self.incident_at = incident_at
         self.incident_segment = self._pick_incident_segment()
