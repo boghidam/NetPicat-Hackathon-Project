@@ -40,7 +40,7 @@ def test_requested_ctp_lines_are_present_and_contiguous(iasi_net):
 
 
 def test_routes_come_from_osm_relations_and_run_along_their_streets():
-    routes = json.loads((DATA_DIR / "iasi_routes.json").read_text())["routes"]
+    routes = json.loads((DATA_DIR / "iasi_routes.json").read_text(encoding="utf-8"))["routes"]
     by_ref = {r["ref"]: r for r in routes}
     assert all(r["osm_relations"] for r in routes)
     graph, lines = load_iasi()

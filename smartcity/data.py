@@ -14,8 +14,8 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 def load_iasi(data_dir: Path | None = None) -> tuple[GraphData, list[RouteData]]:
     """Road graph and CTP Iași bus routes for the central transit spine."""
     folder = data_dir or DATA_DIR
-    core = json.loads((folder / "iasi_core.json").read_text())
-    routes = json.loads((folder / "iasi_routes.json").read_text())
+    core = json.loads((folder / "iasi_core.json").read_text(encoding="utf-8"))
+    routes = json.loads((folder / "iasi_routes.json").read_text(encoding="utf-8"))
     graph = GraphData(
         nodes=[(n["id"], n["lat"], n["lon"]) for n in core["nodes"]],
         edges=[

@@ -1,4 +1,4 @@
-"""Right-hand dashboard: live bus telemetry, AI predictions, detection loops, automated cycle adjustments."""
+"""Professional operations dashboard: live CTP bus telemetry, AI predictions, detection loops, automated cycle adjustments."""
 
 from __future__ import annotations
 
@@ -9,26 +9,48 @@ import pygame
 from .events import OVERRIDE_KINDS
 from .simulation import Simulation
 
-# --- neon-on-dark palette -------------------------------------------------------
-BG = (11, 13, 19)
-PANEL = (16, 19, 27)
-RULE = (38, 44, 60)
-TEXT = (214, 220, 232)
-DIM = (112, 122, 146)
-CYAN = (0, 229, 255)
-MAGENTA = (255, 64, 200)
-LIME = (57, 255, 20)
-AMBER = (255, 196, 0)
-RED = (255, 23, 68)
-ORANGE = (255, 145, 0)
-VIOLET = (170, 120, 255)
-LINE_COLORS = [CYAN, MAGENTA, ORANGE, LIME, VIOLET, AMBER, (255, 105, 135), (0, 255, 170)]
+# --- Refined Mission-Control Dark Theme ---------------------------------------
+BG = (11, 13, 19)             # Deep slate canvas background
+PANEL = (17, 21, 30)          # Operations panel background
+PANEL_BORDER = (34, 42, 58)   # Subtle panel boundary
+CARD_BG = (22, 27, 38)        # Structured card container
+CARD_BORDER = (36, 45, 62)    # Clean card outline
+CARD_HEADER_BG = (27, 34, 48) # Card header surface
+ROW_ALT = (19, 24, 34)        # Alternating table row background
+
+# Typography colors
+TEXT = (240, 244, 250)        # Crisp primary off-white
+TEXT_MUTED = (142, 154, 175)  # Secondary descriptive labels
+TEXT_DIM = (96, 108, 128)     # Muted units & metadata
+DIM = TEXT_MUTED              # Backward compatibility alias
+RULE = (34, 42, 58)           # Hairline card divider
+
+# Semantic status accents
+LIME = (34, 197, 94)          # Emerald green (normal / adaptive / free-flow)
+AMBER = (245, 158, 11)        # Warm amber (warning / slowing / baseline)
+RED = (239, 68, 68)           # Crimson (congestion / incident / stalled)
+CYAN = (14, 165, 233)         # Technical blue (telemetry / forecasts)
+MAGENTA = (236, 72, 153)      # Rose (metering / throttling)
+ORANGE = (249, 115, 22)       # Amber orange (extensions)
+VIOLET = (139, 92, 246)       # Violet
+
+# CTP Transit Authority Line Palette (Clean, distinct transit colors)
+LINE_COLORS = [
+    (14, 165, 233),   # Line 19: Sky Blue
+    (168, 85, 247),   # Line 28: Purple
+    (249, 115, 22),   # Line 36: Orange
+    (34, 197, 94),    # Line 41: Emerald
+    (236, 72, 153),   # Line 20: Rose
+    (234, 179, 8),    # Line 42: Gold
+    (99, 102, 241),   # Line 43: Indigo
+    (20, 184, 166),   # Line 47: Teal
+]
 
 KIND_COLOR = {
     "LOCAL_EXTEND": ORANGE,
     "PREDICTIVE_EXTEND": CYAN,
     "THROTTLE": MAGENTA,
-    "BUDGET_DENIED": DIM,
+    "BUDGET_DENIED": TEXT_DIM,
     "INCIDENT": RED,
     "INFO": TEXT,
 }
@@ -42,18 +64,26 @@ LOG_KINDS = OVERRIDE_KINDS | {"INCIDENT", "INFO", "BUDGET_DENIED"}
 
 
 def speed_color(ratio: float) -> tuple[int, int, int]:
-    """Neon red (stopped) -> amber -> lime (free flow)."""
+    """Smooth semantic ramp: Crimson (stopped) -> Amber (slowed) -> Emerald (free flow)."""
     r = max(0.0, min(1.0, ratio))
     if r < 0.5:
         k = r / 0.5
-        return (255, int(23 + (196 - 23) * k), int(68 * (1 - k)))
+        return (
+            int(239 + (245 - 239) * k),
+            int(68 + (158 - 68) * k),
+            int(68 + (11 - 68) * k),
+        )
     k = (r - 0.5) / 0.5
-    return (int(255 + (57 - 255) * k), int(196 + (255 - 196) * k), int(20 * k))
+    return (
+        int(245 + (34 - 245) * k),
+        int(158 + (197 - 158) * k),
+        int(11 + (94 - 11) * k),
+    )
 
 
 def line_color(sim: Simulation, ref: str) -> tuple[int, int, int]:
     refs = [r.ref for r in sim.net.routes]
-    return LINE_COLORS[refs.index(ref) % len(LINE_COLORS)] if ref in refs else DIM
+    return LINE_COLORS[refs.index(ref) % len(LINE_COLORS)] if ref in refs else TEXT_MUTED
 
 
 @dataclass
@@ -102,10 +132,28 @@ def snapshot_buses(sim: Simulation, n: int = 10) -> list[BusRow]:
 class Hud:
     def __init__(self, rect: pygame.Rect):
         self.rect = rect
-        names = "menlo,dejavusansmono,consolas,couriernew,monospace"
-        self.font = pygame.font.SysFont(names, 13)
-        self.small = pygame.font.SysFont(names, 11)
-        self.title = pygame.font.SysFont(names, 14, bold=True)
+        sans = "segoeui,inter,helveticaneue,arial,sans-serif"
+        mono = "consolas,jetbrainsmono,menlo,dejavusansmono,monospace"
+
+        # Typographic scale
+        self.font_brand = pygame.font.SysFont(sans, 13, bold=True)
+        self.font_card_title = pygame.font.SysFont(sans, 11, bold=True)
+        self.font_sans_sub = pygame.font.SysFont(sans, 10)
+        self.font_sans_bold = pygame.font.SysFont(sans, 10, bold=True)
+        self.font_badge = pygame.font.SysFont(sans, 9, bold=True)
+
+        self.font_kpi_val = pygame.font.SysFont(sans, 16, bold=True)
+        self.font_kpi_lbl = pygame.font.SysFont(sans, 9, bold=True)
+        self.font_kpi_sub = pygame.font.SysFont(sans, 9)
+
+        self.font_mono = pygame.font.SysFont(mono, 11)
+        self.font_mono_bold = pygame.font.SysFont(mono, 11, bold=True)
+        self.font_mono_small = pygame.font.SysFont(mono, 10)
+
+        # Backward compatibility for existing code / tests
+        self.font = self.font_mono
+        self.small = self.font_mono_small
+        self.title = self.font_brand
 
     def fit(self, text: str, font: pygame.font.Font, width: int) -> str:
         if font.size(text)[0] <= width:
@@ -115,118 +163,268 @@ class Hud:
         return text + "…"
 
     def draw(self, screen: pygame.Surface, sim: Simulation, ui: UiState) -> None:
+        # Panel container & left separator
         pygame.draw.rect(screen, PANEL, self.rect)
-        pygame.draw.line(screen, CYAN, self.rect.topleft, self.rect.bottomleft, 1)
-        x, w = self.rect.x + 14, self.rect.width - 28
-        y = self.rect.y + 10
-        y = self._status(screen, sim, ui, x, y, w)
-        y = self._buses(screen, sim, ui, x, y + 8, w)
-        y = self._predictions(screen, sim, x, y + 8, w)
-        y = self._loops(screen, sim, x, y + 8, w)
-        y = self._overrides(screen, sim, x, y + 8, w)
-        self._controls(screen, x, self.rect.bottom - 44, w)
+        pygame.draw.line(screen, PANEL_BORDER, self.rect.topleft, self.rect.bottomleft, 1)
 
-    # -- helpers ---------------------------------------------------------------
-    def _heading(self, screen, text: str, x: int, y: int, w: int, color=CYAN) -> int:
-        screen.blit(self.title.render(text, True, color), (x, y))
-        pygame.draw.line(screen, RULE, (x, y + 20), (x + w, y + 20), 1)
-        return y + 25
+        x = self.rect.x + 14
+        w = self.rect.width - 28
 
-    def _line(self, screen, text: str, x: int, y: int, w: int, color=TEXT, font=None) -> int:
-        font = font or self.font
-        screen.blit(font.render(self.fit(text, font, w), True, color), (x, y))
-        return y + font.get_linesize() + 1
+        # Vertical layout
+        y = self._draw_header(screen, sim, ui, x, self.rect.y + 10, w)
+        y = self._draw_kpi_row(screen, sim, x, y + 8, w)
+        y = self._draw_buses(screen, sim, ui, x, y + 8, w)
+        y = self._draw_predictions(screen, sim, x, y + 8, w)
+        y = self._draw_loops(screen, sim, x, y + 8, w)
+        y = self._draw_overrides(screen, sim, x, y + 8, w)
+        self._draw_controls(screen, x, self.rect.bottom - 48, w)
 
-    # -- panels ----------------------------------------------------------------
-    def _status(self, screen, sim: Simulation, ui: UiState, x: int, y: int, w: int) -> int:
-        mode, color = ("ADAPTIVE AI CONTROL", LIME) if sim.adaptive else ("FIXED TIMERS (baseline)", AMBER)
-        screen.blit(self.title.render(mode, True, color), (x, y))
-        state = "PAUSED" if ui.paused else f"{ui.speed:g}x"
-        t = f"t={sim.t:6.1f}s  {state}"
-        screen.blit(self.font.render(t, True, TEXT), (x + w - self.font.size(t)[0], y))
-        y += 22
-        net = sim.net
-        junctions = sum(n.signalised for n in net.nodes)
-        y = self._line(
-            screen,
-            f"Iași central spine: {junctions} smart junctions, {len(net.segments)} edges, {len(net.routes)} CTP lines",
-            x,
-            y,
-            w,
-            DIM,
-            self.small,
-        )
+    # -- Primitives & Micro-Components -----------------------------------------
+    def _card(
+        self,
+        screen: pygame.Surface,
+        x: int,
+        y: int,
+        w: int,
+        h: int,
+        title: str | None = None,
+        badge: str | None = None,
+        badge_color: tuple[int, int, int] = TEXT_DIM,
+    ) -> int:
+        rect = pygame.Rect(x, y, w, h)
+        pygame.draw.rect(screen, CARD_BG, rect, border_radius=6)
+        pygame.draw.rect(screen, CARD_BORDER, rect, width=1, border_radius=6)
+        if title:
+            # Header area
+            header_rect = pygame.Rect(x, y, w, 24)
+            pygame.draw.rect(screen, CARD_HEADER_BG, header_rect, border_top_left_radius=6, border_top_right_radius=6)
+            pygame.draw.line(screen, CARD_BORDER, (x, y + 24), (x + w, y + 24), 1)
+
+            # Title with small accent dot
+            pygame.draw.circle(screen, CYAN, (x + 10, y + 12), 3)
+            screen.blit(self.font_card_title.render(title.upper(), True, TEXT), (x + 18, y + 5))
+
+            if badge:
+                bw, bh = self.font_badge.size(badge)
+                bx = x + w - bw - 14
+                by = y + 5
+                b_rect = pygame.Rect(bx - 4, by - 1, bw + 8, bh + 2)
+                pygame.draw.rect(screen, (32, 39, 54), b_rect, border_radius=3)
+                screen.blit(self.font_badge.render(badge, True, badge_color), (bx, by))
+            return y + 30
+        return y + 6
+
+    def _badge(
+        self,
+        screen: pygame.Surface,
+        text: str,
+        x: int,
+        y: int,
+        fg_color: tuple[int, int, int],
+        bg_color: tuple[int, int, int],
+        border_color: tuple[int, int, int] | None = None,
+    ) -> int:
+        tw, th = self.font_badge.size(text)
+        rect = pygame.Rect(x, y, tw + 8, th + 4)
+        pygame.draw.rect(screen, bg_color, rect, border_radius=3)
+        if border_color:
+            pygame.draw.rect(screen, border_color, rect, width=1, border_radius=3)
+        screen.blit(self.font_badge.render(text, True, fg_color), (x + 4, y + 2))
+        return rect.right
+
+    def _micro_bar(
+        self, screen: pygame.Surface, x: int, y: int, w: int, h: int, ratio: float, color: tuple[int, int, int]
+    ) -> None:
+        pygame.draw.rect(screen, (32, 40, 56), (x, y, w, h), border_radius=2)
+        filled = max(2, int(w * max(0.0, min(1.0, ratio))))
+        pygame.draw.rect(screen, color, (x, y, filled, h), border_radius=2)
+
+    # -- Header & Top KPI Row --------------------------------------------------
+    def _draw_header(self, screen: pygame.Surface, sim: Simulation, ui: UiState, x: int, y: int, w: int) -> int:
+        # Brand title & Municipal identification
+        screen.blit(self.font_brand.render("IAȘI METROPOLITAN TRANSIT", True, TEXT), (x, y))
+        screen.blit(self.font_sans_sub.render("CTP FLEET AVL · ADAPTIVE SIGNAL CONTROL", True, TEXT_MUTED), (x, y + 16))
+
+        # Status pills on right
+        if sim.adaptive:
+            mode_text = "● ADAPTIVE TSP"
+            fg, bg, bd = (52, 211, 153), (18, 48, 34), (34, 197, 94)
+        else:
+            mode_text = "● FIXED BASELINE"
+            fg, bg, bd = (251, 191, 36), (50, 38, 18), (245, 158, 11)
+
+        rx = x + w - self.font_badge.size(mode_text)[0] - 12
+        self._badge(screen, mode_text, rx, y, fg, bg, bd)
+
+        speed_lbl = "PAUSED" if ui.paused else f"{ui.speed:g}× SPEED"
+        time_str = f"t={sim.t:5.1f}s  {speed_lbl}"
+        screen.blit(self.font_mono_small.render(time_str, True, TEXT_MUTED), (x + w - self.font_mono_small.size(time_str)[0], y + 17))
+
+        return y + 36
+
+    def _draw_kpi_row(self, screen: pygame.Surface, sim: Simulation, x: int, y: int, w: int) -> int:
         m = sim.metrics()
-        y = self._line(
-            screen,
-            f"bus time lost (recent) {m['bus_delay_recent']:5.1%}   overall {m['bus_delay_ratio']:5.1%}",
-            x,
-            y,
-            w,
-        )
-        y = self._line(
-            screen,
-            f"cars {int(m['cars'])}  speed {m['car_speed']:4.0%}  exited {m['throughput']:4.0f}  queued at gates {int(m['queued_outside'])}  adjustments {int(m['overrides'])}",
-            x,
-            y,
-            w,
-            DIM,
-            self.small,
-        )
-        return y
+        gap = 8
+        card_w = (w - gap * 2) // 3
+        card_h = 48
 
-    def _buses(self, screen, sim: Simulation, ui: UiState, x: int, y: int, w: int) -> int:
-        y = self._heading(
+        kpis = [
+            ("BUS TIME LOSS", f"{m['bus_delay_ratio']:.1%}", f"Recent: {m['bus_delay_recent']:.1%}", AMBER if m['bus_delay_ratio'] > 0.35 else LIME),
+            ("TRAFFIC FLOW", f"{m['car_speed']:.0%}", f"{int(m['cars'])} active cars · {int(m['throughput'])} exited", CYAN),
+            ("TSP OVERRIDES", f"{int(m['overrides'])}", "Extend & Throttle cycles", ORANGE if sim.adaptive else TEXT_DIM),
+        ]
+
+        for i, (label, val, sub, col) in enumerate(kpis):
+            cx = x + i * (card_w + gap)
+            rect = pygame.Rect(cx, y, card_w, card_h)
+            pygame.draw.rect(screen, CARD_BG, rect, border_radius=5)
+            pygame.draw.rect(screen, CARD_BORDER, rect, width=1, border_radius=5)
+
+            screen.blit(self.font_kpi_lbl.render(label, True, TEXT_MUTED), (cx + 8, y + 4))
+            screen.blit(self.font_kpi_val.render(val, True, col), (cx + 8, y + 15))
+            screen.blit(self.font_kpi_sub.render(sub, True, TEXT_DIM), (cx + 8, y + 33))
+
+        return y + card_h
+
+    # -- Live Bus Telemetry Card -----------------------------------------------
+    def _draw_buses(self, screen: pygame.Surface, sim: Simulation, ui: UiState, x: int, y: int, w: int) -> int:
+        h = 246
+        inner_y = self._card(
             screen,
-            f"LIVE CTP BUS TELEMETRY  ({sim.api.published:,} msgs, {len(sim.fleet.buses)} buses, {1 / sim.cfg.dt:.0f} Hz)",
             x,
             y,
             w,
+            h,
+            title="Live CTP Bus Telemetry",
+            badge=f"{sim.api.published:,} MSGS · {len(sim.fleet.buses)} BUSES · 10 HZ",
+            badge_color=CYAN,
         )
-        y = self._line(screen, "BUS   LINE  SPEED   TO LINE  DELAY   AI: EXTRA DELAY AHEAD", x, y, w, DIM, self.small)
-        for r in ui.rows:
-            color = speed_color(r.ratio)
-            text = f"{r.bus_id:<5s} {r.line:<4s} {r.speed_kmh:4.0f}km/h {r.dist:5.0f}m {r.delay:5.0f}s   {'+' if r.predicted else ' '}{r.predicted:4.0f}s"
-            screen.blit(self.small.render(text, True, color), (x + 14, y))
-            pygame.draw.rect(screen, line_color(sim, r.line), (x, y + 1, 8, 9))
-            y += self.small.get_linesize() + 1
-        return y + (10 - len(ui.rows)) * (self.small.get_linesize() + 1)
 
-    def _predictions(self, screen, sim: Simulation, x: int, y: int, w: int) -> int:
+        # Table Column Headers
+        col_bus = x + 10
+        col_line = x + 44
+        col_spd = x + 96
+        col_dist = x + 188
+        col_dly = x + 266
+        col_ai = x + 342
+        col_bar = x + 460
+
+        headers = [
+            (col_bus, "BUS"),
+            (col_line, "LINE"),
+            (col_spd, "SPEED"),
+            (col_dist, "TO STOP"),
+            (col_dly, "DELAY"),
+            (col_ai, "AI DELAY AHEAD"),
+            (col_bar, "FLOW"),
+        ]
+        for col_x, name in headers:
+            screen.blit(self.font_badge.render(name, True, TEXT_DIM), (col_x, inner_y))
+
+        inner_y += 14
+        row_h = 20
+
+        visible_rows = ui.rows[:9]
+        for idx, r in enumerate(visible_rows):
+            ry = inner_y + idx * row_h
+            if idx % 2 == 1:
+                pygame.draw.rect(screen, ROW_ALT, (x + 4, ry - 1, w - 8, row_h), border_radius=3)
+
+            # Bus ID
+            screen.blit(self.font_mono.render(r.bus_id, True, TEXT), (col_bus, ry + 2))
+
+            # Transit Line Pill Badge
+            lc = line_color(sim, r.line)
+            line_w, line_h = self.font_mono_small.size(r.line)
+            l_rect = pygame.Rect(col_line, ry + 2, line_w + 6, line_h + 1)
+            pygame.draw.rect(screen, lc, l_rect, border_radius=2)
+            screen.blit(self.font_mono_small.render(r.line, True, (12, 16, 24)), (col_line + 3, ry + 2))
+
+            # Speed with right alignment
+            sc = speed_color(r.ratio)
+            spd_text = f"{r.speed_kmh:4.0f} km/h"
+            screen.blit(self.font_mono.render(spd_text, True, sc), (col_spd, ry + 2))
+
+            # Distance to stop line
+            dist_text = f"{r.dist:5.0f} m"
+            screen.blit(self.font_mono.render(dist_text, True, TEXT_MUTED), (col_dist, ry + 2))
+
+            # Accumulated Delay
+            dly_text = f"{r.delay:5.0f} s"
+            dly_col = RED if r.delay > 60 else (AMBER if r.delay > 20 else TEXT_MUTED)
+            screen.blit(self.font_mono.render(dly_text, True, dly_col), (col_dly, ry + 2))
+
+            # AI predicted extra delay ahead
+            if r.predicted > 0.5:
+                pred_text = f"+{r.predicted:4.0f} s"
+                pred_col = RED if r.predicted > 20 else AMBER
+            else:
+                pred_text = "   —"
+                pred_col = TEXT_DIM
+            screen.blit(self.font_mono.render(pred_text, True, pred_col), (col_ai, ry + 2))
+
+            # Speed Flow Micro-bar
+            self._micro_bar(screen, col_bar, ry + 6, 52, 6, r.ratio, sc)
+
+        return y + h
+
+    # -- AI Route Forecasts Card -----------------------------------------------
+    def _draw_predictions(self, screen: pygame.Surface, sim: Simulation, x: int, y: int, w: int) -> int:
         p = sim.predictor
-        y = self._heading(screen, "AI PREDICTIONS (along each bus's route)", x, y, w)
-        y = self._line(
+        h = 104
+        inner_y = self._card(
             screen,
-            f"model {p.model_name}  speed MAE {p.mae_speed * 3.6:4.1f} km/h  ETA err {p.mae_eta:4.1f}s  resolved {p.resolved}",
             x,
             y,
             w,
-            DIM,
-            self.small,
+            h,
+            title="AI Route Predictions (Feed-Forward)",
+            badge=f"{p.model_name} · MAE {p.mae_speed * 3.6:3.1f} KM/H · RESOLVED {p.resolved}",
+            badge_color=CYAN,
         )
-        upcoming = [f for f in p.active(sim.t) if f.hop == 1][:4]
-        if not upcoming:
-            y = self._line(screen, "(waiting for a bus to clear a junction)", x, y, w, DIM, self.small)
-        for f in upcoming:
-            seg = sim.net.segments[f.target_segment]
-            color = RED if f.predicted_delay > 20 else AMBER if f.predicted_delay > 6 else LIME
-            eta = f"ETA {f.eta - sim.t:3.0f}s" if f.eta > sim.t else "at line"
-            name = (seg.name or seg.highway)[:20]
-            y = self._line(
-                screen,
-                f"{f.source_bus} L{f.line:<3s} -> n{seg.to_node} {name:<20s} +{f.predicted_delay:3.0f}s {eta:>7s} c{f.confidence:.2f}",
-                x,
-                y,
-                w,
-                color,
-                self.small,
-            )
-        for msg in list(p.recent_resolved)[-1:]:
-            y = self._line(screen, "done: " + msg, x, y, w, DIM, self.small)
-        return y
 
-    def _loops(self, screen, sim: Simulation, x: int, y: int, w: int) -> int:
-        y = self._heading(screen, "VIRTUAL DETECTION LOOPS (50 / 150 / 300 m)", x, y, w)
+        upcoming = [f for f in p.active(sim.t) if f.hop == 1][:3]
+        if not upcoming:
+            screen.blit(self.font_mono_small.render("● Waiting for transit vehicles to clear approach stop lines…", True, TEXT_DIM), (x + 12, inner_y + 12))
+        else:
+            for idx, f in enumerate(upcoming):
+                fy = inner_y + idx * 16
+                seg = sim.net.segments[f.target_segment]
+                color = RED if f.predicted_delay > 20 else (AMBER if f.predicted_delay > 6 else LIME)
+                eta_s = f"{f.eta - sim.t:3.0f}s" if f.eta > sim.t else "at line"
+                name = (seg.name or seg.highway)[:18]
+
+                # Ticket line: Bus -> Node Street | Delay | ETA | Conf
+                prefix = f"{f.source_bus} L{f.line:<2s} → n{seg.to_node:<2d} {name:<18s}"
+                screen.blit(self.font_mono_small.render(prefix, True, TEXT), (x + 10, fy))
+
+                stats = f"+{f.predicted_delay:2.0f}s delay  ETA {eta_s:>6s}  conf {f.confidence:.2f}"
+                screen.blit(self.font_mono_small.render(stats, True, color), (x + 288, fy))
+
+        # Recent resolved summary
+        if p.recent_resolved:
+            last = list(p.recent_resolved)[-1]
+            ry = inner_y + 54
+            pygame.draw.line(screen, RULE, (x + 8, ry - 3), (x + w - 8, ry - 3), 1)
+            screen.blit(self.font_badge.render("RESOLVED:", True, TEXT_DIM), (x + 10, ry))
+            screen.blit(self.font_mono_small.render(self.fit(last, self.font_mono_small, w - 70), True, TEXT_MUTED), (x + 64, ry - 1))
+
+        return y + h
+
+    # -- Virtual Detection Loops Card ------------------------------------------
+    def _draw_loops(self, screen: pygame.Surface, sim: Simulation, x: int, y: int, w: int) -> int:
+        h = 92
+        inner_y = self._card(
+            screen,
+            x,
+            y,
+            w,
+            h,
+            title="Virtual Detection Loops",
+            badge="50 / 150 / 300 M WINDOWS",
+            badge_color=TEXT_MUTED,
+        )
+
         ranked = sorted(
             (
                 (r.density or 0.0, sid, r)
@@ -235,57 +433,92 @@ class Hud:
             ),
             key=lambda t: -t[0],
         )[:3]
+
         if not ranked:
-            y = self._line(screen, "(no bus inside a window)", x, y, w, DIM, self.small)
-        for dens, sid, r in ranked:
-            seg = sim.net.segments[sid]
-            color = RED if dens > 0.6 else AMBER if dens > 0.3 else LIME
-            y = self._line(
-                screen,
-                f"n{seg.to_node} {(seg.name or seg.highway)[:20]:<20s} buses {r.count[0]}/{r.count[1]}/{r.count[2]}  load {dens:4.2f}",
-                x,
-                y,
-                w,
-                color,
-                self.small,
-            )
-        return y + (3 - len(ranked)) * (self.small.get_linesize() + 1)
+            screen.blit(self.font_mono_small.render("● No transit vehicles currently inside detector windows", True, TEXT_DIM), (x + 12, inner_y + 12))
+        else:
+            for idx, (dens, sid, r) in enumerate(ranked):
+                ly = inner_y + idx * 17
+                seg = sim.net.segments[sid]
+                color = RED if dens > 0.6 else (AMBER if dens > 0.3 else LIME)
+                name = (seg.name or seg.highway)[:20]
 
-    def _overrides(self, screen, sim: Simulation, x: int, y: int, w: int) -> int:
-        y = self._heading(screen, "AUTOMATED CYCLE ADJUSTMENTS (overrides of the standard timer)", x, y, w)
-        room = (self.rect.bottom - 52 - y) // (self.small.get_linesize() + 1)
-        events = sim.events.recent(max(4, room), LOG_KINDS)
-        if not events:
-            y = self._line(screen, "(none yet: standard timers running)", x, y, w, DIM, self.small)
-        for e in reversed(events):
-            y = self._line(
-                screen,
-                f"{e.t:6.1f} {KIND_LABEL.get(e.kind, e.kind):<9} {e.text}",
-                x,
-                y,
-                w,
-                KIND_COLOR.get(e.kind, TEXT),
-                self.small,
-            )
-        return y
+                txt = f"n{seg.to_node:<2d} {name:<20s}  buses [{r.count[0]}/{r.count[1]}/{r.count[2]}]"
+                screen.blit(self.font_mono_small.render(txt, True, TEXT), (x + 10, ly))
 
-    def _controls(self, screen, x: int, y: int, w: int) -> None:
-        pygame.draw.line(screen, RULE, (x, y - 4), (x + w, y - 4), 1)
-        self._line(
+                load_txt = f"{dens:.2f}"
+                screen.blit(self.font_mono_small.render(load_txt, True, color), (x + 360, ly))
+                self._micro_bar(screen, x + 400, ly + 4, 110, 6, dens, color)
+
+        return y + h
+
+    # -- Automated Cycle Adjustments (Override Log) ----------------------------
+    def _draw_overrides(self, screen: pygame.Surface, sim: Simulation, x: int, y: int, w: int) -> int:
+        h = 168
+        inner_y = self._card(
             screen,
-            "SPACE pause  B adaptive/fixed  I incident  1 2 4 8 speed  H heat  L bus lines  R reset",
             x,
             y,
             w,
-            DIM,
-            self.small,
+            h,
+            title="Automated Cycle Adjustments",
+            badge=f"{sim.events.overrides} TOTAL OVERRIDES",
+            badge_color=ORANGE if sim.events.overrides else TEXT_DIM,
         )
-        self._line(
-            screen,
-            "mouse: wheel zoom, drag pan   F fit map   +/- zoom   arrows pan   Q quit",
-            x,
-            y + 14,
-            w,
-            DIM,
-            self.small,
-        )
+
+        events = sim.events.recent(7, LOG_KINDS)
+        if not events:
+            screen.blit(self.font_mono_small.render("● Standard fixed-time signal cycles running (no overrides required)", True, TEXT_DIM), (x + 12, inner_y + 16))
+        else:
+            for idx, e in enumerate(reversed(events)):
+                ey = inner_y + idx * 16
+
+                # Time tag
+                t_str = f"{e.t:5.1f}s"
+                screen.blit(self.font_mono_small.render(t_str, True, TEXT_DIM), (x + 10, ey))
+
+                # Kind badge
+                kind_lbl = KIND_LABEL.get(e.kind, e.kind)
+                kind_col = KIND_COLOR.get(e.kind, TEXT)
+                kw, kh = self.font_badge.size(kind_lbl)
+                kb_rect = pygame.Rect(x + 58, ey, kw + 6, kh + 1)
+                pygame.draw.rect(screen, (32, 40, 56), kb_rect, border_radius=2)
+                screen.blit(self.font_badge.render(kind_lbl, True, kind_col), (x + 61, ey))
+
+                # Description text
+                desc = self.fit(e.text, self.font_mono_small, w - 140)
+                screen.blit(self.font_mono_small.render(desc, True, TEXT_MUTED), (x + 130, ey))
+
+        return y + h
+
+    # -- Footer Quick Controls Bar ---------------------------------------------
+    def _draw_controls(self, screen: pygame.Surface, x: int, y: int, w: int) -> None:
+        pygame.draw.line(screen, PANEL_BORDER, (x, y - 4), (x + w, y - 4), 1)
+
+        def key_pill(key: str, desc: str, px: int, py: int) -> int:
+            kw, kh = self.font_badge.size(key)
+            rect = pygame.Rect(px, py, kw + 6, kh + 2)
+            pygame.draw.rect(screen, (34, 42, 60), rect, border_radius=3)
+            pygame.draw.rect(screen, (52, 64, 88), rect, width=1, border_radius=3)
+            screen.blit(self.font_badge.render(key, True, TEXT), (px + 3, py + 1))
+            screen.blit(self.font_sans_sub.render(desc, True, TEXT_MUTED), (px + kw + 10, py))
+            return px + kw + 10 + self.font_sans_sub.size(desc)[0] + 12
+
+        # Row 1: Primary action keys
+        px = x
+        px = key_pill("SPACE", "Pause", px, y)
+        px = key_pill("B", "Adaptive", px, y)
+        px = key_pill("I", "Incident", px, y)
+        px = key_pill("1-8", "Speed", px, y)
+        px = key_pill("H", "Heat", px, y)
+        px = key_pill("L", "Lines", px, y)
+        key_pill("R", "Reset", px, y)
+
+        # Row 2: Camera & navigation
+        py = y + 18
+        px = x
+        px = key_pill("WHEEL", "Zoom", px, py)
+        px = key_pill("DRAG", "Pan", px, py)
+        px = key_pill("F", "Fit Map", px, py)
+        px = key_pill("+ / -", "Scale", px, py)
+        key_pill("Q", "Quit", px, py)

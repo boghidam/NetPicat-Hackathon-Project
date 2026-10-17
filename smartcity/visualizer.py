@@ -1,4 +1,4 @@
-"""Pygame renderer: a dark smart-city dashboard over the real road network, with pan and zoom."""
+"""Professional GIS map renderer: dark cartographic visualization of Iași with real-time transit telemetry."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from .hud import (
     KIND_COLOR,
     LIME,
     RED,
+    TEXT,
     Hud,
     UiState,
     line_color,
@@ -24,13 +25,29 @@ from .network import RoadNetwork
 from .simulation import Simulation
 from .traffic_model import Vehicle
 
-ASPHALT = (64, 71, 88)
-ASPHALT_EDGE = (30, 34, 46)
-NODE_RING = (70, 80, 104)
-SIGNAL = {"G": (57, 255, 20), "Y": (255, 225, 0), "R": (255, 23, 68)}  # neon
-CAR = (150, 205, 255)
-CAR_OUTLINE = (12, 18, 30)
-ROAD_WIDTH_M = {"primary": 11.0, "secondary": 10.0, "tertiary": 9.0}  # a lane each way plus a margin
+# --- Cartographic Road Hierarchy Palette -------------------------------------
+ROAD_PRIMARY = (54, 63, 80)
+ROAD_PRIMARY_EDGE = (22, 27, 36)
+ROAD_SECONDARY = (44, 52, 68)
+ROAD_SECONDARY_EDGE = (18, 23, 31)
+ROAD_TERTIARY = (34, 41, 54)
+ROAD_TERTIARY_EDGE = (15, 19, 26)
+
+ASPHALT = ROAD_PRIMARY
+ASPHALT_EDGE = ROAD_PRIMARY_EDGE
+NODE_RING = (48, 58, 76)
+
+# Signal lights (vibrant, high-contrast traffic optics)
+SIGNAL = {
+    "G": (34, 197, 94),   # Emerald green
+    "Y": (245, 158, 11),  # Amber
+    "R": (239, 68, 68),   # Crimson
+}
+
+# Vehicle styling
+CAR = (147, 197, 253)         # Sky blue metallic
+CAR_OUTLINE = (15, 23, 42)    # Dark slate outline
+ROAD_WIDTH_M = {"primary": 12.0, "secondary": 10.0, "tertiary": 8.0}
 RING_KINDS = {"LOCAL_EXTEND", "PREDICTIVE_EXTEND", "THROTTLE"}
 
 
@@ -74,6 +91,9 @@ class Camera:
         self.cy = wy + (sy - self.rect.centery) / self.scale
         self.version += 1
 
+    def zoom_centre(self, factor: float) -> None:
+        self.zoom_at(self.rect.centerx, self.rect.centery, factor)
+
     def pan_pixels(self, dx: float, dy: float) -> None:
         self.cx -= dx / self.scale
         self.cy += dy / self.scale
@@ -84,22 +104,28 @@ class CityView:
     def __init__(self, sim: Simulation, rect: pygame.Rect):
         self.rect = rect
         self.camera = Camera(rect, sim.net)
-        names = "menlo,dejavusansmono,consolas,monospace"
-        self.label = pygame.font.SysFont(names, 10)
-        self.chip = pygame.font.SysFont(names, 10, bold=True)
-        self.banner = pygame.font.SysFont(names, 15, bold=True)
+        sans = "segoeui,inter,helveticaneue,arial,sans-serif"
+        mono = "consolas,jetbrainsmono,menlo,monospace"
+
+        self.label = pygame.font.SysFont(sans, 10, bold=True)
+        self.chip = pygame.font.SysFont(mono, 10, bold=True)
+        self.banner = pygame.font.SysFont(sans, 14, bold=True)
+        self.sub_banner = pygame.font.SysFont(sans, 10)
+        self.legend_font = pygame.font.SysFont(sans, 9)
+        self.legend_bold = pygame.font.SysFont(sans, 9, bold=True)
+
         self._layer = pygame.Surface(rect.size)
         self._layer_state: tuple | None = None  # (cx, cy, scale, show_lines)
         self._layer_time = 0.0
         self._chips: dict[str, pygame.Surface] = {}
 
-    # -- input helpers -------------------------------------------------------
+    # -- Input helpers ---------------------------------------------------------
     def zoom(self, pos: tuple[int, int], factor: float) -> None:
         if self.rect.collidepoint(pos):
             self.camera.zoom_at(pos[0], pos[1], factor)
 
     def zoom_centre(self, factor: float) -> None:
-        self.camera.zoom_at(self.rect.centerx, self.rect.centery, factor)
+        self.camera.zoom_centre(factor)
 
     def drag(self, rel: tuple[int, int]) -> None:
         self.camera.pan_pixels(*rel)
@@ -107,7 +133,7 @@ class CityView:
     def fit(self) -> None:
         self.camera.fit()
 
-    # -- frame ---------------------------------------------------------------
+    # -- Frame rendering -------------------------------------------------------
     def draw(self, screen: pygame.Surface, sim: Simulation, ui: UiState) -> None:
         screen.set_clip(self.rect)
         self._draw_layer(screen, sim, ui)
@@ -116,17 +142,17 @@ class CityView:
         self._forecasts(screen, sim)
         self._rings(screen, sim)
         self._vehicles(screen, sim)
+        self._map_overlays(screen, sim, ui)
         self._legend(screen, sim, ui)
         screen.set_clip(None)
 
-    # -- cached road layer ------------------------------------------------------
-    def _draw_layer(self, screen, sim: Simulation, ui: UiState) -> None:
+    # -- Cached road layer -----------------------------------------------------
+    def _draw_layer(self, screen: pygame.Surface, sim: Simulation, ui: UiState) -> None:
         cam = self.camera
         state = (cam.cx, cam.cy, cam.scale, ui.show_lines)
         if state != self._layer_state:
             panned_only = self._layer_state is not None and state[2:] == self._layer_state[2:]
             if panned_only and time.time() - self._layer_time < 0.1:
-                # dragging: reuse the old layer, shifted, and re-render once the view settles
                 ox = (self._layer_state[0] - cam.cx) * cam.scale
                 oy = -(self._layer_state[1] - cam.cy) * cam.scale
                 screen.fill(BG, self.rect)
@@ -137,7 +163,6 @@ class CityView:
         screen.blit(self._layer, self.rect.topleft)
 
     def _poly(self, sim: Simulation, seg_id: int, shift_m: float = 0.0) -> list[tuple[float, float]]:
-        """Screen-space polyline of a segment (relative to the layer), optionally shifted to its right."""
         seg, cam = sim.net.segments[seg_id], self.camera
         sx = sy = 0.0
         if shift_m:
@@ -153,39 +178,75 @@ class CityView:
     def _render_layer(self, sim: Simulation, ui: UiState) -> None:
         surf, net, cam = self._layer, sim.net, self.camera
         surf.fill(BG)
+
         twin = {(s.from_node, s.to_node): s.id for s in net.segments}
-        drawn: list[tuple[list[tuple[float, float]], int]] = []
+        drawn: list[tuple[list[tuple[float, float]], int, str]] = []
+
         for seg in net.segments:
             back = twin.get((seg.to_node, seg.from_node))
             if back is not None and back < seg.id:
-                continue  # a two-way road is drawn once
-            # exaggerate road width when zoomed out so the network stays readable; true scale when zoomed in
+                continue
+
+            hwy = seg.highway.replace("_link", "")
+            if "primary" in hwy:
+                base_w = ROAD_WIDTH_M["primary"]
+                tier = "primary"
+            elif "secondary" in hwy:
+                base_w = ROAD_WIDTH_M["secondary"]
+                tier = "secondary"
+            else:
+                base_w = ROAD_WIDTH_M["tertiary"]
+                tier = "tertiary"
+
             exaggerate = 1.0 + 1.1 * max(0.0, min(1.0, (0.6 - cam.scale) / 0.5))
-            width = max(3, int(exaggerate * ROAD_WIDTH_M.get(seg.highway.replace("_link", ""), 9.0) * cam.scale))
-            drawn.append((self._poly(sim, seg.id), width))
-        for pts, width in drawn:  # dark casing under every road so crossings read cleanly
-            pygame.draw.lines(surf, ASPHALT_EDGE, False, pts, width + 2)
-        for pts, width in drawn:
-            pygame.draw.lines(surf, ASPHALT, False, pts, width)
+            width = max(3, int(exaggerate * base_w * cam.scale))
+            drawn.append((self._poly(sim, seg.id), width, tier))
+
+        # Pass 1: Dark Casing for road boundary separation
+        for pts, width, tier in drawn:
+            edge_color = ROAD_PRIMARY_EDGE if tier == "primary" else (ROAD_SECONDARY_EDGE if tier == "secondary" else ROAD_TERTIARY_EDGE)
+            pygame.draw.lines(surf, edge_color, False, pts, width + 2)
+
+        # Pass 2: Road Surface Fills
+        for pts, width, tier in drawn:
+            fill_color = ROAD_PRIMARY if tier == "primary" else (ROAD_SECONDARY if tier == "secondary" else ROAD_TERTIARY)
+            pygame.draw.lines(surf, fill_color, False, pts, width)
             if width >= 5:
                 for p in pts:
-                    pygame.draw.circle(surf, ASPHALT, p, width // 2)
+                    pygame.draw.circle(surf, fill_color, p, width // 2)
+
+        # Pass 3: Transit Line Corridor Overlays (L toggle)
         if ui.show_lines:
             for k, route in enumerate(net.routes):
-                color = line_color(sim, route.ref)
-                shift = (2.0 + 2.0 * k) / cam.scale  # a few pixels to the right, a different offset per line
+                col = line_color(sim, route.ref)
+                shift = (2.0 + 2.0 * k) / cam.scale
                 for sid in route.edges:
                     pts = self._poly(sim, sid, shift)
                     if len(pts) >= 2:
-                        pygame.draw.lines(surf, lerp(color, ASPHALT, 0.5), False, pts, 1)
+                        pygame.draw.lines(surf, lerp(col, ROAD_PRIMARY, 0.4), False, pts, max(1, int(1.5 * cam.scale)))
+
+        # Pass 4: Landmark Points of Interest (Clean Mapbox-style capsules)
         for name, lat, lon in net.landmarks_ll:
             sx, sy = cam.latlon_to_screen(lat, lon)
             px, py = sx - self.rect.x, sy - self.rect.y
-            pygame.draw.circle(surf, CYAN, (px, py), 3, 1)
-            surf.blit(self.label.render(name.upper(), True, (80, 140, 160)), (px + 6, py - 5))
+            lbl = name.upper()
+            tw, th = self.label.size(lbl)
+            w_cap = tw + 22
+            h_cap = th + 6
+            bx = max(8, min(surf.get_width() - w_cap - 8, int(px - 4)))
+            by = max(8, min(surf.get_height() - h_cap - 8, int(py - th // 2 - 2)))
 
-    # -- dynamic layers ---------------------------------------------------------
-    def _heat(self, screen, sim: Simulation, ui: UiState) -> None:
+            capsule = pygame.Surface((w_cap, h_cap), pygame.SRCALPHA)
+            pygame.draw.rect(capsule, (17, 24, 38, 225), (0, 0, w_cap, h_cap), border_radius=4)
+            pygame.draw.rect(capsule, (45, 58, 80, 240), (0, 0, w_cap, h_cap), width=1, border_radius=4)
+            surf.blit(capsule, (bx, by))
+
+            # Pin dot and label text
+            pygame.draw.circle(surf, CYAN, (bx + 8, by + h_cap // 2), 3)
+            surf.blit(self.label.render(lbl, True, (230, 238, 250)), (bx + 16, by + 3))
+
+    # -- Dynamic Heat Layer ----------------------------------------------------
+    def _heat(self, screen: pygame.Surface, sim: Simulation, ui: UiState) -> None:
         if ui.heat == 0:
             return
         cam = self.camera
@@ -193,46 +254,62 @@ class CityView:
             load = sim.model.density(seg.id) if ui.heat == 1 else sim.coord.load[seg.id]
             if load < 0.15:
                 continue
-            color = lerp(ASPHALT, speed_color(1.0 - load), min(1.0, load * 1.5))
+            color = lerp(ROAD_PRIMARY, speed_color(1.0 - load), min(1.0, load * 1.5))
             pts = [cam.to_screen(*sim.net.position(seg.id, p)[:2]) for p in (seg.stop_pos * k / 4 for k in range(5))]
             pygame.draw.lines(screen, color, False, pts, max(3, int(6 * cam.scale)))
 
-    def _junctions(self, screen, sim: Simulation) -> None:
+    # -- Signalized Junctions & Stop Lines -------------------------------------
+    def _junctions(self, screen: pygame.Surface, sim: Simulation) -> None:
         cam, net = self.camera, sim.net
         r = max(2, int(sim.cfg.box_half * cam.scale))
-        half = max(3.0, 3.2 * cam.scale) / cam.scale  # stop-line half width in metres
+        half = max(3.0, 3.2 * cam.scale) / cam.scale
+
         for node in net.nodes:
             cx, cy = cam.to_screen(node.x, node.y)
             if not self.rect.inflate(60, 60).collidepoint(cx, cy):
                 continue
             if node.gate:
-                pygame.draw.polygon(screen, CYAN, [(cx, cy - 5), (cx + 5, cy), (cx, cy + 5), (cx - 5, cy)], 1)
+                pygame.draw.polygon(screen, CYAN, [(cx, cy - 6), (cx + 6, cy), (cx, cy + 6), (cx - 6, cy)], 1)
                 continue
             ctl = sim.controllers.get(node.id)
             if ctl is None:
                 continue
+
+            # Junction center perimeter ring
             pygame.draw.circle(screen, NODE_RING, (cx, cy), r, 1)
+
+            # Approach Stop-Lines (Crisp glowing bars with casing)
             for seg_id in ctl.approaches:
                 seg = net.segments[seg_id]
                 x, y, dx, dy = net.position(seg_id, seg.stop_pos)
                 a = cam.to_screen(x - dy * half, y + dx * half)
                 b = cam.to_screen(x + dy * half, y - dx * half)
-                pygame.draw.line(screen, SIGNAL[ctl.state_for(seg_id)], a, b, 4 if cam.scale > 0.4 else 3)
 
-    def _forecasts(self, screen, sim: Simulation) -> None:
+                sig_state = ctl.state_for(seg_id)
+                sig_col = SIGNAL[sig_state]
+
+                # 1px Dark edge shadow under stop bar
+                pygame.draw.line(screen, (10, 14, 20), a, b, 6 if cam.scale > 0.4 else 5)
+                # Vibrant stop bar
+                pygame.draw.line(screen, sig_col, a, b, 4 if cam.scale > 0.4 else 3)
+
+    # -- AI Forecast Diamonds --------------------------------------------------
+    def _forecasts(self, screen: pygame.Surface, sim: Simulation) -> None:
         cam = self.camera
         for f in sim.predictor.active(sim.t):
             if f.predicted_density < sim.cfg.pred_density_min:
                 continue
             seg = sim.net.segments[f.target_segment]
             cx, cy = cam.to_screen(*sim.net.position(seg.id, max(0.0, seg.stop_pos - 25))[:2])
-            r = int(5 + 7 * f.confidence * (1.0 if f.hop == 1 else 0.7))
+            r = int(5 + 6 * f.confidence * (1.0 if f.hop == 1 else 0.7))
             pygame.draw.polygon(screen, CYAN, [(cx, cy - r), (cx + r, cy), (cx, cy + r), (cx - r, cy)], 2)
 
-    def _rings(self, screen, sim: Simulation) -> None:
+    # -- Adaptive Override Pulsing Rings ---------------------------------------
+    def _rings(self, screen: pygame.Surface, sim: Simulation) -> None:
         cam = self.camera
-        pulse = 0.5 + 0.5 * math.sin(sim.t * 6.0)
+        pulse = 0.5 + 0.5 * math.sin(sim.t * 5.0)
         seen: set[int] = set()
+
         for e in reversed(sim.events.since(sim.t - 3.0)):
             if e.node is None or e.kind not in RING_KINDS or e.node in seen:
                 continue
@@ -240,15 +317,20 @@ class CityView:
             node = sim.net.nodes[e.node]
             cx, cy = cam.to_screen(node.x, node.y)
             age = (sim.t - e.t) / 3.0
-            r = int(14 + 6 * pulse + 10 * age)
-            pygame.draw.circle(screen, KIND_COLOR.get(e.kind, AMBER), (cx, cy), r, 2)
+            r = int(14 + 6 * pulse + 12 * age)
+            color = KIND_COLOR.get(e.kind, AMBER)
+            pygame.draw.circle(screen, color, (cx, cy), r, 2)
 
-    def _body(self, screen, sim, v: Vehicle, length_px: float, width_px: float, color, outline) -> tuple[float, float]:
+    # -- Vehicles & Transit Glyphs ---------------------------------------------
+    def _body(
+        self, screen: pygame.Surface, sim: Simulation, v: Vehicle, length_px: float, width_px: float, color, outline
+    ) -> tuple[float, float]:
         x, y, dx, dy = sim.net.position(v.seg, v.pos - v.length / 2)
         cx, cy = self.camera.to_screen(x, y)
-        ux, uy = dx, -dy  # heading on screen
+        ux, uy = dx, -dy
         nx, ny = -uy, ux
         hl, hw = length_px / 2, width_px / 2
+
         pts = [
             (cx + ux * hl + nx * hw, cy + uy * hl + ny * hw),
             (cx + ux * hl - nx * hw, cy + uy * hl - ny * hw),
@@ -262,22 +344,27 @@ class CityView:
     def _chip(self, ref: str, color) -> pygame.Surface:
         key = f"{ref}{color}"
         if key not in self._chips:
-            text = self.chip.render(ref, True, (8, 10, 16))
+            text = self.chip.render(ref, True, (12, 16, 24))
             surf = pygame.Surface((text.get_width() + 6, text.get_height() + 2), pygame.SRCALPHA)
             pygame.draw.rect(surf, color, surf.get_rect(), border_radius=3)
             surf.blit(text, (3, 1))
             self._chips[key] = surf
         return self._chips[key]
 
-    def _vehicles(self, screen, sim: Simulation) -> None:
+    def _vehicles(self, screen: pygame.Surface, sim: Simulation) -> None:
         cam = self.camera
         view = self.rect.inflate(40, 40)
         buses = []
+
         for v in sim.model.iter_vehicles():
             if v.kind == "blocker":
-                cx, cy = self._body(screen, sim, v, 9.0, 6.0, (150, 20, 40), RED)
-                pygame.draw.line(screen, RED, (cx - 7, cy - 7), (cx + 7, cy + 7), 3)
-                pygame.draw.line(screen, RED, (cx - 7, cy + 7), (cx + 7, cy - 7), 3)
+                # Stalled Incident Vehicle: High-visibility warning marker
+                cx, cy = self._body(screen, sim, v, 10.0, 6.0, (180, 24, 40), (255, 200, 200))
+                # Hazard cross & pulsing ring
+                pulse_r = int(12 + 4 * math.sin(sim.t * 8.0))
+                pygame.draw.circle(screen, RED, (cx, cy), pulse_r, 1)
+                pygame.draw.line(screen, RED, (cx - 6, cy - 6), (cx + 6, cy + 6), 3)
+                pygame.draw.line(screen, RED, (cx - 6, cy + 6), (cx + 6, cy - 6), 3)
             elif v.kind == "bus":
                 buses.append(v)
             else:
@@ -292,61 +379,120 @@ class CityView:
                         CAR,
                         CAR_OUTLINE,
                     )
-        for v in buses:  # buses on top, coloured by speed, tagged with their line number
+
+        # Buses rendered on top with speed ramp and route badge
+        for v in buses:
             seg = sim.net.segments[v.seg]
+            col = speed_color(v.v / seg.speed_limit)
             cx, cy = self._body(
                 screen,
                 sim,
                 v,
-                max(10.0, v.length * cam.scale),
-                max(4.5, 2.6 * cam.scale * 1.3),
-                speed_color(v.v / seg.speed_limit),
+                max(11.0, v.length * cam.scale),
+                max(4.8, 2.6 * cam.scale * 1.3),
+                col,
                 (245, 250, 255),
             )
             screen.blit(self._chip(v.line or "?", line_color(sim, v.line or "")), (cx + 6, cy - 14))
 
-    def _legend(self, screen, sim: Simulation, ui: UiState) -> None:
-        x, y = self.rect.x + 14, self.rect.y + 10
-        mode, color = ("ADAPTIVE", LIME) if sim.adaptive else ("FIXED TIMERS", AMBER)
-        screen.blit(self.banner.render(mode, True, color), (x, y))
-        heat = ("", "link occupancy: true (hidden)", "link load: estimated from buses")[ui.heat]
-        if heat:
-            screen.blit(self.label.render(heat, True, DIM), (x, y + 20))
-        rows = [
-            (CAR, "car"),
-            (speed_color(1.0), "bus: free flow"),
-            (speed_color(0.5), "bus: slowing"),
-            (speed_color(0.0), "bus: stopped"),
+    # -- Top-Left Map Status Overlay -------------------------------------------
+    def _map_overlays(self, screen: pygame.Surface, sim: Simulation, ui: UiState) -> None:
+        x, y = self.rect.x + 14, self.rect.y + 12
+
+        # Floating map status capsule
+        mode_str = "ADAPTIVE AI CONTROL" if sim.adaptive else "FIXED TIMERS BASELINE"
+        mode_col = LIME if sim.adaptive else AMBER
+
+        card_w, card_h = 320, 42
+        capsule = pygame.Surface((card_w, card_h), pygame.SRCALPHA)
+        pygame.draw.rect(capsule, (17, 22, 32, 220), (0, 0, card_w, card_h), border_radius=6)
+        pygame.draw.rect(capsule, (36, 46, 64, 240), (0, 0, card_w, card_h), width=1, border_radius=6)
+        screen.blit(capsule, (x, y))
+
+        # Status pip & Text
+        pygame.draw.circle(screen, mode_col, (x + 14, y + 14), 4)
+        screen.blit(self.banner.render(mode_str, True, TEXT), (x + 24, y + 6))
+
+        heat_name = ("", "LINK DENSITY: TRUE WORLD", "LINK LOAD: ESTIMATED FROM BUSES")[ui.heat]
+        sub = heat_name if heat_name else f"IAȘI ARTERIAL CORRIDOR · {sum(n.signalised for n in sim.net.nodes)} SIGNALS"
+        screen.blit(self.sub_banner.render(sub, True, (138, 150, 170)), (x + 24, y + 24))
+
+    # -- Bottom-Left Interactive Legend Card -----------------------------------
+    def _legend(self, screen: pygame.Surface, sim: Simulation, ui: UiState) -> None:
+        # Floating legend container
+        card_w = 480
+        card_h = 76 if not ui.show_lines else 94
+        x = self.rect.x + 14
+        y = self.rect.bottom - card_h - 12
+
+        card = pygame.Surface((card_w, card_h), pygame.SRCALPHA)
+        pygame.draw.rect(card, (17, 22, 32, 220), (0, 0, card_w, card_h), border_radius=6)
+        pygame.draw.rect(card, (36, 46, 64, 240), (0, 0, card_w, card_h), width=1, border_radius=6)
+        screen.blit(card, (x, y))
+
+        # Row 1: Signals and vehicle types
+        ry1 = y + 8
+        # Signals
+        sx = x + 12
+        screen.blit(self.legend_bold.render("SIGNALS:", True, (138, 150, 170)), (sx, ry1))
+        sx += 52
+        for st, name, col in (("G", "Green", SIGNAL["G"]), ("Y", "Yellow", SIGNAL["Y"]), ("R", "Red", SIGNAL["R"])):
+            pygame.draw.line(screen, col, (sx, ry1 + 5), (sx + 10, ry1 + 5), 3)
+            screen.blit(self.legend_font.render(name, True, (210, 218, 230)), (sx + 14, ry1))
+            sx += 52
+
+        # Vehicles
+        sx = x + 240
+        screen.blit(self.legend_bold.render("VEHICLES:", True, (138, 150, 170)), (sx, ry1))
+        sx += 58
+        pygame.draw.rect(screen, CAR, (sx, ry1 + 1, 9, 8), border_radius=2)
+        screen.blit(self.legend_font.render("Car", True, (210, 218, 230)), (sx + 13, ry1))
+        sx += 42
+        for ratio, lbl in ((1.0, "Free"), (0.5, "Slow"), (0.0, "Queue")):
+            pygame.draw.rect(screen, speed_color(ratio), (sx, ry1 + 1, 9, 8), border_radius=2)
+            screen.blit(self.legend_font.render(lbl, True, (210, 218, 230)), (sx + 13, ry1))
+            sx += 44
+
+        # Row 2: Adaptive events
+        ry2 = y + 28
+        screen.blit(self.legend_bold.render("EVENTS:", True, (138, 150, 170)), (x + 12, ry2))
+        ex = x + 64
+
+        events = [
+            ("LOCAL_EXTEND", "Bus Extend", KIND_COLOR["LOCAL_EXTEND"]),
+            ("PREDICTIVE_EXTEND", "AI Forecast", KIND_COLOR["PREDICTIVE_EXTEND"]),
+            ("THROTTLE", "Throttle", KIND_COLOR["THROTTLE"]),
         ]
-        base = self.rect.bottom - 14 * len(rows) - 10
-        for i, (c, text) in enumerate(rows):
-            pygame.draw.rect(screen, c, (x, base + 14 * i + 1, 10, 9))
-            screen.blit(self.label.render(text, True, (170, 176, 195)), (x + 15, base + 14 * i))
-        x2 = x + 140
-        for i, (state, text) in enumerate((("G", "green"), ("Y", "yellow"), ("R", "red / all-red"))):
-            pygame.draw.line(screen, SIGNAL[state], (x2, base + 14 * i + 6), (x2 + 12, base + 14 * i + 6), 4)
-            screen.blit(self.label.render(text, True, (170, 176, 195)), (x2 + 18, base + 14 * i))
-        pygame.draw.polygon(
-            screen, CYAN, [(x2 + 5, base + 49), (x2 + 10, base + 54), (x2 + 5, base + 59), (x2, base + 54)], 1
-        )
-        screen.blit(self.label.render("gate / AI forecast", True, (170, 176, 195)), (x2 + 18, base + 47))
-        for i, (kind, text) in enumerate(
-            (("LOCAL_EXTEND", "bus extension"), ("PREDICTIVE_EXTEND", "AI override"), ("THROTTLE", "throttle"))
-        ):
-            pygame.draw.circle(screen, KIND_COLOR[kind], (x2 + 150, base + 14 * i + 6), 5, 2)
-            screen.blit(self.label.render(text, True, (170, 176, 195)), (x2 + 160, base + 14 * i))
+        for kind, name, col in events:
+            pygame.draw.circle(screen, col, (ex + 4, ry2 + 5), 4, 2)
+            screen.blit(self.legend_font.render(name, True, (210, 218, 230)), (ex + 12, ry2))
+            ex += 94
+
+        pygame.draw.polygon(screen, CYAN, [(ex + 4, ry2 + 1), (ex + 8, ry2 + 5), (ex + 4, ry2 + 9), (ex, ry2 + 5)], 1)
+        screen.blit(self.legend_font.render("Gate / AI Target", True, (210, 218, 230)), (ex + 12, ry2))
+
+        # Row 3: Active CTP Lines (if enabled)
         if ui.show_lines:
-            for k, route in enumerate(sim.net.routes[:8]):
-                col, row = divmod(k, 4)
-                px = x2 + 270 + col * 70
-                screen.blit(self._chip(route.ref, line_color(sim, route.ref)), (px, base + 14 * row))
+            ry3 = y + 48
+            screen.blit(self.legend_bold.render("ROUTES:", True, (138, 150, 170)), (x + 12, ry3))
+            rx = x + 64
+            for route in sim.net.routes[:8]:
+                c = line_color(sim, route.ref)
+                screen.blit(self._chip(route.ref, c), (rx, ry3 - 1))
+                rx += 38
+
+        # Bottom-Right Scale Bar
         scale_m = 500
         bar = scale_m * self.camera.scale
-        by = self.rect.bottom - 10
-        bx = self.rect.right - 20 - bar
-        pygame.draw.line(screen, DIM, (bx, by), (bx + bar, by), 2)
-        txt = self.label.render(f"{scale_m} m", True, DIM)
-        screen.blit(txt, (bx + bar - txt.get_width(), by - 14))
+        by = self.rect.bottom - 16
+        bx = self.rect.right - 24 - bar
+
+        # End ticks and bar
+        pygame.draw.line(screen, (80, 95, 120), (bx, by), (bx + bar, by), 2)
+        pygame.draw.line(screen, (80, 95, 120), (bx, by - 4), (bx, by + 4), 2)
+        pygame.draw.line(screen, (80, 95, 120), (bx + bar, by - 4), (bx + bar, by + 4), 2)
+        txt = self.legend_bold.render(f"{scale_m} m", True, (140, 155, 175))
+        screen.blit(txt, (bx + bar / 2 - txt.get_width() / 2, by - 14))
 
 
 WINDOW = (1440, 860)
