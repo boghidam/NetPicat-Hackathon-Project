@@ -173,31 +173,46 @@ def test_density_is_occupied_fraction_of_the_edge():
     assert w.density(seg) == pytest.approx((cfg.car_length + cfg.min_gap) / 200.0)
 
 
-def test_left_turner_yields_to_moving_oncoming_traffic_then_goes():
+def crossing_times(w, cars, state="G", seconds=40):
+    """When each car first appears on a different edge from the one it started on."""
+    dt, started, when = w.cfg.dt, {c.id: c.seg for c in cars}, {}
+    for i in range(int(seconds / dt)):
+        w.step(i * dt, dt, lambda s: state, lambda s: 1.0)
+        for c in cars:
+            if c.id not in when and c.seg != started[c.id]:
+                when[c.id] = i * dt
+    return when
+
+
+def test_both_sides_of_a_green_phase_pass_at_the_same_time():
     cfg, net, w = make()
     west = net.segments[road(net, 4, 5)]  # eastbound into node 5
-    east = net.segments[road(net, 6, 5)]  # westbound into node 5: the oncoming approach
+    east = net.segments[road(net, 6, 5)]  # westbound into node 5: the opposite approach, same phase
     assert net.partner[west.id] == east.id
-    left_target = turn(net, west.id, "left")
-    straight = turn(net, east.id, "straight")
-    left = put(w, west.id, west.stop_pos - 3.0, v=0.0, next_seg=left_target)
-    oncoming = put(w, east.id, east.stop_pos - 12.0, v=10.0, next_seg=straight)
-    w.step(0.0, cfg.dt, lambda s: "G", lambda s: 1.0)
-    assert left.pos <= west.stop_pos  # held at the line while a car bears down on the box
-    run(w, 10, state="G")
-    assert oncoming.seg == straight and left.seg == left_target  # then it turns once the road is clear
+    a = [put(w, west.id, west.stop_pos - 2 - 7 * i, next_seg=turn(net, west.id, "straight")) for i in range(4)]
+    b = [put(w, east.id, east.stop_pos - 2 - 7 * i, next_seg=turn(net, east.id, "straight")) for i in range(4)]
+    when = crossing_times(w, a + b)
+    assert len(when) == 8  # every car of both queues got through
+    for ca, cb in zip(a, b, strict=True):
+        assert abs(when[ca.id] - when[cb.id]) < 1.5  # side by side, not one side after the other
+    assert max(when.values()) < 15
 
 
-def test_two_left_turns_from_opposite_sides_do_not_block_each_other():
+def test_a_left_turner_holds_up_neither_the_cars_behind_it_nor_the_oncoming_side():
     cfg, net, w = make()
-    a, b = net.segments[road(net, 4, 5)], net.segments[road(net, 6, 5)]
-    va = put(w, a.id, a.stop_pos - 3.0, next_seg=turn(net, a.id, "left"))
-    vb = put(w, b.id, b.stop_pos - 3.0, next_seg=turn(net, b.id, "left"))
-    run(w, 15, state="G")
-    assert va.seg != a.id and vb.seg != b.id
+    west = net.segments[road(net, 4, 5)]
+    east = net.segments[road(net, 6, 5)]
+    left = put(w, west.id, west.stop_pos - 2, next_seg=turn(net, west.id, "left"))
+    behind = put(w, west.id, west.stop_pos - 9, next_seg=turn(net, west.id, "straight"))
+    oncoming = [
+        put(w, east.id, east.stop_pos - 2 - 7 * i, v=8.0, next_seg=turn(net, east.id, "straight")) for i in range(5)
+    ]
+    when = crossing_times(w, [left, behind, *oncoming])
+    assert len(when) == 7  # nobody waited for anybody else to clear the box
+    assert when[left.id] < 5 and when[behind.id] < 8 and max(when[c.id] for c in oncoming) < 12
 
 
-def test_streams_merging_into_the_same_edge_take_turns_in_the_box():
+def test_streams_merging_into_the_same_edge_both_get_through_one_behind_the_other():
     cfg, net, w = make()
     a = net.segments[road(net, 1, 5)]  # southbound into node 5, turning right (west)
     b = net.segments[road(net, 9, 5)]  # northbound into node 5, turning left (west)
@@ -205,9 +220,13 @@ def test_streams_merging_into_the_same_edge_take_turns_in_the_box():
     assert turn(net, b.id, "left") == target
     va = put(w, a.id, a.stop_pos - 1.0, v=4.0, next_seg=target)
     vb = put(w, b.id, b.stop_pos - 1.0, v=4.0, next_seg=target)
-    for i in range(int(20 / cfg.dt)):
-        w.step(i * cfg.dt, cfg.dt, lambda s: "G", lambda s: 1.0)
+    dt, when = cfg.dt, {}
+    for i in range(int(20 / dt)):
+        w.step(i * dt, dt, lambda s: "G", lambda s: 1.0)
         lane = w.lanes[target]
         for ahead, behind in zip(lane, lane[1:], strict=False):
-            assert behind.pos <= ahead.pos - ahead.length + 1e-6
-    assert va.seg != a.id and vb.seg != b.id  # both got through, one after the other
+            assert behind.pos <= ahead.pos - ahead.length + 1e-6  # they follow, never overlap
+        for v, src in ((va, a), (vb, b)):
+            if v.id not in when and v.seg != src.id:
+                when[v.id] = i * dt
+    assert len(when) == 2 and abs(when[va.id] - when[vb.id]) < 3.0  # not made to take turns at the line

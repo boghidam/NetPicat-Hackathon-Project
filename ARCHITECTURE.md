@@ -112,11 +112,10 @@ Identical in fixed and adaptive mode, in plain Python in the spirit of SUMO's sa
 
 - *Red:* a vehicle holds at the stop line; nothing enters the box while its light is red.
 - *Yellow:* a vehicle stops if it can still do so with maximum braking; only vehicles too fast to stop continue.
-- *Green:* a vehicle crosses only if the start of its next edge has room, so nobody enters the box without room to leave it.
+- *Green:* a vehicle crosses only if there will be room on the start of its next edge when it reaches the junction centre (whoever is last on that edge will have moved on by then, unless it is standing in a queue or stalled), so nobody enters the box without room to leave it.
 - *Car-following:* a vehicle keeps a safe distance behind the one ahead along the polyline (`v <= sqrt(2 * a_comfort * room)`), with no overtaking, so vehicles never overlap and never jump across nodes.
 - *Speed:* each vehicle drives at its edge's speed limit (cars vary by up to 8%), accelerating at 1.8 m/s² and braking at up to 6 m/s².
-- *Left turns:* both opposite streets are green together, so a left-turner yields while oncoming traffic is moving toward the box or in it.
-- *Merging:* two streams turning into the same edge never share the box.
+- *Both sides pass together:* nothing yields to oncoming traffic. The two opposite streets of a green phase (and a left turn across the oncoming one) go at the same time and simply cross inside the box; when two streams merge into the same edge, the later vehicle falls in behind the earlier one as it lands. This keeps a left-turner from holding up everyone behind it on a one-lane road.
 - *Throttle:* when the coordinator meters an approach, cars (not buses) are released no faster than `sat_flow * g`.
 - *Incident:* a stalled vehicle parks mid-edge for 150 s. On a one-lane road nobody can overtake, so the lane is blocked.
 
@@ -222,7 +221,7 @@ Everything except the window is headless. 119 tests:
 
 - **Network and geometry:** projection round trip, compass names, polyline position and lane side on a bent road, stop-line set-back; phase grouping on crossroads, T, skewed, five-way and two-approach nodes; turn options without U-turns; gates; routing.
 - **Iași dataset:** real streets and landmarks present, lengths and limits plausible, the requested lines (19, 28, 36, 41) present and contiguous, routes run along their streets, every gate reaches every other, every signalised junction has valid phases.
-- **World rules:** stop line on red, proceed on green, queue gaps, edge speed limits, wait when the exit is full, yellow, throttle spacing, buses not throttled, left-turn yield, two left turns pass, merge exclusion, stalled vehicle, cars follow gate-to-gate routes.
+- **World rules:** stop line on red, proceed on green, queue gaps, edge speed limits, wait when the exit is full, yellow, throttle spacing, buses not throttled, both sides of a green phase crossing in lockstep, a left-turner holding up neither the cars behind it nor the oncoming side, merging streams falling in behind one another, stalled vehicle, cars follow gate-to-gate routes.
 - **Signals:** opposite lights match at every junction at every tick (300 s of the real map); one phase non-red at a time; every street served; phase order green-yellow-all-red; **7 s minimum green, 3 s yellow and 2 s all-red measured**, including with adaptive extensions; **a green is never shorter than its standard time and its planned length only ever grows**.
 - **Sensing and controllers:** detection windows including across junctions, standing-bus rules, queue occupancy, route-aware `buses_near`; the route odometer (laps, history, unjudgeable buses); **the per-cycle check: a bus that barely moved gets the green extended, one that made good progress changes nothing, extensions scale with the shortfall, no judgement without a whole cycle of history or a previous green, far or off-route buses ignored, no extension into jammed streets, cap and budget, fixed timers unaffected**; the graph-aware throttle (an overloaded *downstream junction* throttles an upstream release onto a free edge) and its bus waiver; predictive extension.
 - **Prediction:** forecasts follow the route for three hops and wrap; the window moves ahead as the bus clears junctions; unknown lines get one hop; error recording, expiry, ridge learning.
@@ -237,24 +236,25 @@ Everything except the window is headless. 119 tests:
 
 | mode | bus time lost | car speed (share of limit) | edge-seconds half-occupied | cars exited | adjustments |
 |---|---|---|---|---|---|
-| fixed timers | 38.0% | 59% | 328 | 268 | 0 |
-| adaptive | 37.6% | 57% | 337 | 265 | 245 |
+| fixed timers | 36.2% | 64% | 179 | 278 | 0 |
+| adaptive | 35.6% | 62% | 172 | 277 | 220 |
 
 Other demand levels (bus time lost / car speed / jam edge-seconds / cars exited, fixed then adaptive):
 
 | demand (cars/s per gate) | seeds | fixed timers | adaptive |
 |---|---|---|---|
-| 0.045 | 4 | 36.4% / 65% / 36 / 219 | 36.2% / 63% / 38 / 219 |
-| 0.06 | 4 | 37.4% / 62% / 109 / 244 | 37.2% / 62% / 114 / 242 |
-| 0.08 (default) | 6 | 38.0% / 59% / 328 / 268 | 37.6% / 57% / 337 / 265 |
+| 0.045 | 4 | 35.5% / 67% / 34 / 223 | 35.1% / 65% / 44 / 221 |
+| 0.06 | 4 | 35.6% / 65% / 66 / 252 | 35.3% / 64% / 74 / 250 |
+| 0.08 (default) | 6 | 36.2% / 64% / 179 / 278 | 35.6% / 62% / 172 / 277 |
 
-Ablation at the default demand (6 seeds; bus time lost / car speed / jam / exited): fixed 38.0% / 58.5% / 328 / 268; everything on 37.6% / 57.0% / 337 / 265; no throttle 37.6% / 58.1% / 352 / 267; throttle only 38.4% / 57.7% / 314 / 264; no cycle extension and no predictive extension (equal to throttle only).
+Ablation at the default demand (6 seeds; bus time lost / car speed / jam / exited): fixed 36.2% / 63.5% / 179 / 278; everything on 35.6% / 62.5% / 172 / 277; no throttle 35.5% / 63.1% / 194 / 275; throttle only 36.3% / 62.7% / 163 / 278; no cycle extension 36.3% / 62.5% / 175 / 277.
 
 - **Performance.** A frame at 1x speed costs about 9 ms (map and dashboard 5 ms, six simulation ticks 3.4 ms), so the demo holds 60 FPS; at 4x about 53 FPS; the loop keeps the window responsive at 8x. A 15-minute run simulates in about 6 s headless.
-- **With only bus evidence and extend-only greens, adaptive control is close to a wash.** The per-cycle check fires a few dozen times in ten minutes and each time cites a bus that really was held (113 m in a 50 s cycle, and so on). It lowers bus time lost by about 0.8 points relative to the throttle alone, and 0.4 points relative to fixed timers, at the cost of a little green taken from the cross street. The throttle, which the brief asks for to prevent shifting a bottleneck, costs car speed (about one point) and barely changes how long edges stay half-full. Net: bus time lost 0.2 to 0.4 points lower, car speed 0 to 2 points lower, throughput within 1%, jams unchanged within noise. An earlier version that also shortened some greens to lengthen others (score-sized splits and early switches, which decided about cars from estimates) measured better for buses (1.7 points at the default demand) and for jams; removing those, as required because the cars are not observed, gives that up.
+- **With only bus evidence and extend-only greens, adaptive control is close to a wash.** The per-cycle check fires a few dozen times in ten minutes and each time cites a bus that really was held (113 m in a 50 s cycle, and so on). It lowers bus time lost by about 0.7 points relative to the throttle alone and 0.6 points relative to fixed timers, at the cost of a little green taken from the cross street. The throttle, which the brief asks for to prevent shifting a bottleneck, costs car speed (about one point) and changes how long edges stay half-full little. Net: bus time lost 0.3 to 0.6 points lower, car speed 1 to 2 points lower, throughput within 1%, jams unchanged within noise. An earlier version that also shortened some greens to lengthen others (score-sized splits and early switches, which decided about cars from estimates) measured better for buses (1.7 points at the default demand, under the previous traffic rules) and for jams; removing those, as required because the cars are not observed, gives that up.
+- **Free-flowing both sides help every mode.** Letting both sides of a phase pass together (no yielding, entry room judged for the moment of arrival) made the baseline itself much better than before: at the default demand fixed timers now lose 36.2% of bus time (was 38.0%), cars average 64% of the limit (was 59%), and half-occupied edge-seconds fell from 328 to 179.
 - **Differences from the request.** CTP's lines as described in the brief (28: Dacia - Podu Roș - Triumf; 41: Dacia - Podu Roș) do not match OpenStreetMap, where line 28 is Dacia - Copou and line 41 is Blocuri Ciurea - Piața Independenței. The dataset uses the OSM relations, since that is what can be queried; line 19 (Canta - CUG) and 36 (Dacia - Breazu) match. Only the part of each line inside the cropped map is simulated, and OSM relations are volunteer-maintained and may differ from CTP's current timetable.
-- **Simplifications.** One lane per direction whatever OSM `lanes` says; only primary/secondary/tertiary roads (plus what the routes need), so residential streets are absent; every junction with three or more approaches is signalised, whereas only some are in reality; no pedestrians, lane changes or turn lanes; no collision physics inside the box; unsignalised bends and merges give way only by the room check. Speed limits come from `maxspeed` tags with a 50 km/h urban default.
-- **Left turns** are the weak spot of paired phases on one lane: a left-turner waiting for a gap holds up the cars behind it.
+- **Simplifications.** One lane per direction whatever OSM `lanes` says; only primary/secondary/tertiary roads (plus what the routes need), so residential streets are absent; every junction with three or more approaches is signalised, whereas only some are in reality; no pedestrians, lane changes or turn lanes; no collision physics inside the box (opposite streams and left turns pass through each other there); unsignalised bends and merges give way only by the room check. Speed limits come from `maxspeed` tags with a 50 km/h urban default.
+- **Nobody yields.** A model that made left-turners wait for gaps was dropped because on one lane the waiting vehicle blocked its whole approach while the oncoming side flowed. Over ten simulated minutes the number of vehicles standing at a green line six seconds or more into the green fell from 468 to 13 (the rest wait for a full road ahead).
 - **Predictive extensions are rare.** The model works but regresses to the mean, so few forecasts are dense enough to act on; the per-cycle check does most of the work. ETA error is large (roughly 15-25 s) because forecast arrivals ignore waiting at red.
 - **Bus-only sensing** means unvisited edges have no fresh data; confidence decays to a neutral prior, so the controllers see the *neighbourhood of the buses*, not the whole city.
 - **Rush hour** is approximated by raising demand (`--demand`); there is no time-of-day profile yet. Weights and thresholds are hand-tuned on a few seeds, not optimised.

@@ -4,11 +4,12 @@ Controllers never read this directly. They only see what the buses report, so th
 really are the sensors. The world enforces the physical rules (SUMO-style, in plain Python):
 
 * a vehicle may not pass the stop line while its light is red, nor on yellow if it can still
-  stop, and it never enters the junction box unless there is room to leave it;
+  stop, and it never enters the junction box unless there will be room on the next edge when it
+  gets there;
 * vehicles follow the one ahead at a safe distance along the edge polyline and cannot overtake,
   so they never overlap and never jump across nodes;
-* left turns yield to oncoming traffic that shares their phase, and two streams merging into the
-  same edge take turns;
+* both streets of a phase pass together: nothing yields to oncoming traffic, and two streams that
+  merge into the same edge fall in behind one another when they land;
 * a throttled approach (see the coordinator) releases cars at a reduced rate.
 
 Every vehicle follows a route: buses loop forever along their line, cars follow a gate-to-gate
@@ -61,9 +62,9 @@ class TrafficModel:
         self._ids = 0
         self._release_factor: Callable[[int], float] = lambda s: 1.0
         self._signal_state: Callable[[int], str] = lambda s: "G"
-        # vehicles that have passed a stop line and are crossing the box: target edge -> {vehicle id: source edge}
+        # vehicles that have passed a stop line and are crossing the box (used so that cars are not spawned into an
+        # edge that traffic is entering): target edge -> {vehicle id: source edge}
         self.in_box: dict[int, dict[str, int]] = {}
-        self._kind_cache: dict[tuple[int, int], str] = {}
         self._seed_cars()
 
     # -- creation ------------------------------------------------------------
@@ -247,8 +248,6 @@ class TrafficModel:
             return True  # can still stop, so it must; only vehicles too fast to stop run the yellow
         if not self._can_enter(v):
             return True  # never enter the box without room to leave it
-        if self._turns_left(v, seg) and self._oncoming_conflict(seg):
-            return True  # yield to oncoming traffic, which is green at the same time
         if v.kind == "car":
             g = self._release_factor(seg.id)
             if g <= 0.0:
@@ -257,41 +256,17 @@ class TrafficModel:
                 return True
         return False
 
-    def _turns_left(self, v: Vehicle, seg: Segment) -> bool:
-        if v.next_seg is None:
-            return False
-        key = (seg.id, v.next_seg)
-        kind = self._kind_cache.get(key)
-        if kind is None:
-            kind = self._kind_cache[key] = self.net.turn_kind(seg.id, v.next_seg)
-        return kind == "left"
-
-    def _oncoming_conflict(self, seg: Segment) -> bool:
-        """Is oncoming traffic about to enter the box from the opposite approach?"""
-        opp_id = self.net.partner.get(seg.id)
-        if opp_id is None:
-            return False
-        opp = self.net.segments[opp_id]
-        for u in self.lanes[opp_id]:
-            if u.kind == "blocker" or u.pos < opp.stop_pos - 25.0:
-                continue
-            if self._turns_left(u, opp):
-                continue  # two left turns pass each other
-            if u.pos > opp.stop_pos or u.v > 1.5:  # moving toward the box, or already in it
-                return True
-        return False
-
     def _can_enter(self, v: Vehicle) -> bool:
         if v.next_seg is None:
             return True
-        # one stream at a time may merge into an edge; the box is not shared by two merging streams
-        if any(src != v.seg for src in self.in_box.get(v.next_seg, {}).values()):
-            return False
         lane = self.lanes[v.next_seg]
         if not lane:
             return True
+        # Room is judged for the moment this vehicle reaches the junction centre, not for now: whoever is
+        # last on the next edge will have moved on by then, unless it is standing (a queue, a stalled vehicle).
         tail = lane[-1]
-        return tail.pos - tail.length >= v.length + self.cfg.min_gap
+        arrive = (self.net.segments[v.seg].length - v.pos) / max(v.v, 3.0)
+        return tail.pos - tail.length + tail.v * arrive >= v.length + self.cfg.min_gap
 
     def _cross(self, seg: Segment, v: Vehicle) -> None:
         """The vehicle has reached the intersection centre: hand it to the next segment."""
@@ -301,7 +276,13 @@ class TrafficModel:
             return
         self.in_box.get(tgt, {}).pop(v.id, None)
         v.seg, v.pos = tgt, max(0.0, v.pos - seg.length)
-        self.lanes[tgt].append(v)
+        lane = self.lanes[tgt]
+        if lane:  # two streams may merge into this edge at once: the later one falls in behind the earlier
+            ahead = lane[-1]
+            room = ahead.pos - ahead.length - self.cfg.min_gap
+            if v.pos > room:
+                v.pos, v.v = room, min(v.v, ahead.v)  # may be a little before the centre: still in the junction
+        lane.append(v)
         v.leg += 1
         if v.cyclic and v.route is not None and v.leg >= len(v.route):
             v.leg = 0
