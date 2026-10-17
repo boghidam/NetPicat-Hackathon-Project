@@ -120,7 +120,7 @@ class Hud:
         )
         y = self._line(
             screen,
-            f"mean link load {m['mean_density']:4.2f}  peak {m['peak_density']:4.2f}  exited {m['throughput']:5.0f} veh  overrides {int(m['overrides'])}",
+            f"cars {int(m['cars'])}  speed {m['car_speed']:4.0%}  exited {m['throughput']:4.0f}  queued at gates {int(m['queued_outside'])}  overrides {int(m['overrides'])}",
             x,
             y,
             w,
@@ -157,11 +157,11 @@ class Hud:
             y = self._line(screen, "(waiting for a bus to clear an intersection)", x, y, w, DIM, self.small)
         for f in upcoming:
             seg = sim.grid.segments[f.target_segment]
-            color = RED if f.predicted_density > 0.6 else AMBER if f.predicted_density > 0.35 else GREEN
+            color = RED if f.predicted_density > 0.6 else AMBER if f.predicted_density > 0.3 else GREEN
             eta = f"ETA {f.eta - sim.t:4.1f}s" if f.eta > sim.t else "ETA at line"
             y = self._line(
                 screen,
-                f"{f.source_bus} -> n{seg.to_node} {'NS' if seg.axis == 0 else 'EW'}  density {f.predicted_density:4.2f}  {eta}  conf {f.confidence:.2f}",
+                f"{f.source_bus} -> {sim.coord.label(seg.id)}  density {f.predicted_density:4.2f}  {eta}  conf {f.confidence:.2f}",
                 x,
                 y,
                 w,

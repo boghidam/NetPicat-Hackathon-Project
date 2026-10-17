@@ -10,37 +10,43 @@ class Config:
     # --- city grid -------------------------------------------------------
     rows: int = 4
     cols: int = 4
-    block_length: float = 200.0  # m between adjacent intersections
+    block_length: float = 200.0  # m between adjacent intersection centres
+    gate_length: float = 100.0  # m of the entry/exit road beyond the west and east edge nodes
+    box_half: float = 14.0  # m from an intersection centre to its stop lines (half the junction box)
     seed: int = 7
 
     # --- simulation clock ------------------------------------------------
     dt: float = 0.1  # s per simulation tick (10 Hz API)
     decision_period: float = 0.5  # s between controller decisions / coordinator refresh
 
-    # --- hidden traffic model (macroscopic) ------------------------------
-    free_speed: float = 12.0  # m/s
-    min_speed: float = 0.4  # m/s floor, even at jam density
-    jam_density: float = 0.2  # veh/m (two lanes)
-    sat_flow: float = 0.7  # veh/s discharged per green approach
-    base_demand: float = 0.09  # veh/s entering each segment from side streets
-    demand_jitter: float = 0.25  # +- fraction of per-segment demand heterogeneity
-    initial_fill: float = 0.15  # initial density as a fraction of jam density
-    turn_straight: float = 0.70
-    turn_left: float = 0.15
-    turn_right: float = 0.15
+    # --- vehicles --------------------------------------------------------
+    free_speed: float = 12.0  # m/s (buses drive exactly this; cars vary a little)
+    car_speed_var: float = 0.08
+    car_length: float = 4.5
+    bus_length: float = 11.0
+    min_gap: float = 2.0  # m bumper-to-bumper when stopped
+    accel: float = 1.8  # m/s^2
+    comfort_brake: float = 3.0  # m/s^2 used to plan stops and following distance
+    max_brake: float = 6.0  # m/s^2 emergency limit
+    sat_flow: float = 0.5  # veh/s one lane discharges; sets the headway when throttled
+    lane_offset: float = 5.0  # m lateral offset so opposite directions don't overlap
+
+    # --- cars ------------------------------------------------------------
+    gate_demand: float = 0.08  # veh/s entering at each gate
+    initial_cars: int = 70
+    route_follow: float = 0.8  # chance a car takes a turn that gets it closer to its exit
+    spawn_backlog_max: int = 40  # cars waiting outside a blocked gate before new ones are dropped
 
     # --- buses -----------------------------------------------------------
     buses_per_route: int = 2
-    bus_gap: float = 14.0  # m minimum spacing between buses on a segment
-    bus_accel: float = 1.5  # m/s^2
-    bus_brake: float = 2.5  # m/s^2
-    lane_offset: float = 5.0  # m lateral offset so opposite directions don't overlap
 
     # --- signals ---------------------------------------------------------
-    base_green: float = 28.0  # s, the "standard timer"
+    # One street (approach) is green at a time, in sequence; yellow then all-red clears the box.
+    base_green: float = 14.0  # s, the "standard timer" per approach
     yellow: float = 2.0
-    min_green: float = 10.0
-    max_green: float = 50.0
+    all_red: float = 1.5
+    min_green: float = 6.0
+    max_green: float = 28.0
 
     # --- congestion estimator -------------------------------------------
     est_alpha: float = 0.3  # EWMA smoothing
@@ -52,13 +58,13 @@ class Config:
     # --- local optimisation ---------------------------------------------
     v_slow_frac: float = 0.5  # bus slower than this fraction of free speed => slow
     d_trigger: float = 120.0  # m from stop line within which a slow bus counts
-    ext_gain: float = 10.0  # s: extension = gain * (1 - speed / v_slow)
-    ext_remaining: float = 6.0  # only extend when this little green remains
+    ext_gain: float = 8.0  # s: extension = gain * (1 - speed / v_slow)
+    ext_remaining: float = 4.0  # only extend when this little green remains
     ext_cooldown: float = 3.0
     early_switch_margin: float = 0.3  # score gap that justifies ending a green early
 
     # --- global optimisation --------------------------------------------
-    rho_gate: float = 0.55  # downstream load above which releases are metered
+    rho_gate: float = 0.65  # downstream load above which releases are metered
     rho_block: float = 0.85  # downstream load at which the movement is not served
     w_pressure: float = 0.35
     w_bus_delay: float = 0.25
@@ -82,10 +88,8 @@ class Config:
     pred_hop2_decay: float = 0.5  # confidence multiplier for the second hop
     pred_decay_tau: float = 40.0  # s: how quickly a forecast's weight fades with ETA
     lead_window: float = 10.0  # s before ETA in which the target pre-adjusts
-    pred_density_min: float = 0.45  # predicted density that justifies pre-adjusting
-    pred_ext: float = 7.0  # s of predictive green extension
+    pred_density_min: float = 0.2  # predicted density that justifies pre-adjusting
+    pred_ext: float = 6.0  # s of predictive green extension
 
     # --- incident -------------------------------------------------------
-    incident_outflow_mult: float = 0.25  # blocked lane: discharge multiplier
-    incident_demand_mult: float = 2.0
-    incident_duration: float = 240.0  # s
+    incident_duration: float = 150.0  # s a stalled vehicle blocks the lane

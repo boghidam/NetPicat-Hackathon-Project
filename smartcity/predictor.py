@@ -102,7 +102,7 @@ class PostIntersectionPredictor:
     def _accumulate(self, track: _Track, tel: BusTelemetry) -> None:
         cfg = self.cfg
         seg = self.grid.segments[tel.segment_id]
-        pos = seg.length - tel.dist_to_next_node
+        pos = seg.stop_pos - tel.dist_to_next_node
         if pos >= cfg.est_skip_start and tel.dist_to_next_node >= cfg.est_skip_end:
             track.ratio_sum += max(0.0, min(1.0, tel.speed / tel.free_speed))
             track.ratio_n += 1
@@ -164,7 +164,7 @@ class PostIntersectionPredictor:
         track.pending = (f1, x)
 
         nxt = self.grid.straight_next(seg.id)
-        if nxt is not None:
+        if nxt is not None and self.grid.segments[nxt].signalised:
             ratio2 = 0.6 * ratio + 0.4 * (1.0 - cfg.est_prior_load)  # persistence, regressing to normal
             eta2 = eta + self.grid.segments[nxt].length / max(1.0, ratio2 * cfg.free_speed)
             self._publish(tel, nxt, 2, eta2, ratio2, confidence * cfg.pred_hop2_decay)

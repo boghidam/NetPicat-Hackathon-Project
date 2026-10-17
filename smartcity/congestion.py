@@ -28,7 +28,7 @@ class CongestionEstimator:
     def on_telemetry(self, tel: BusTelemetry) -> None:
         cfg = self.cfg
         seg = self.grid.segments[tel.segment_id]
-        pos = seg.length - tel.dist_to_next_node
+        pos = seg.stop_pos - tel.dist_to_next_node
         if pos < cfg.est_skip_start or tel.dist_to_next_node < cfg.est_skip_end:
             return
         sid = tel.segment_id

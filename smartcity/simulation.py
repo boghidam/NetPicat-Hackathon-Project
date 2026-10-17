@@ -23,7 +23,7 @@ class Simulation:
         self.events = EventLog()
         self.model = TrafficModel(self.grid, cfg, rng)
         self.api = TelemetryBus()
-        self.fleet = BusFleet(self.grid, cfg, rng, self.api)
+        self.fleet = BusFleet(self.grid, cfg, rng, self.model, self.api)
         self.estimator = CongestionEstimator(self.grid, cfg)
         self.predictor = PostIntersectionPredictor(self.grid, cfg, self.events)
         self.coord = NetworkCoordinator(self.grid, cfg, self.estimator, self.predictor, self.events, adaptive)
@@ -73,16 +73,18 @@ class Simulation:
             self.trigger_incident()
         for c in self.controllers.values():
             c.step(self.t, dt)
-        self.model.step(self.t, dt, lambda s: self.coord.signal_state(s) == "G", self.coord.release_factor)
-        self.fleet.step(self.t, dt, self.coord.signal_state, self.model.speed)
+        self.model.step(self.t, dt, self.coord.signal_state, self.coord.release_factor)
+        self.fleet.emit(self.t)
         self._since_refresh += dt
         if self._since_refresh >= cfg.decision_period:
             self._since_refresh = 0.0
             self.coord.refresh(self.t)
+            roads = [s.id for s in self.grid.segments if s.kind == "road"]
+            self.peak_density = max(self.peak_density, max(self.model.density(i) for i in roads))
         self.t += dt
-        mean_slow = sum(1.0 - min(1.0, b.v / cfg.free_speed) for b in self.fleet.buses) / len(self.fleet.buses)
+        buses = self.fleet.buses
+        mean_slow = sum(1.0 - min(1.0, b.v / cfg.free_speed) for b in buses) / len(buses)
         self.slow_ema += (mean_slow - self.slow_ema) * dt / 60.0
-        self.peak_density = max(self.peak_density, max(self.model.density(i) for i in range(len(self.grid.segments))))
 
     def run(self, seconds: float) -> None:
         for _ in range(int(round(seconds / self.cfg.dt))):
@@ -98,6 +100,9 @@ class Simulation:
             "bus_delay_recent": self.slow_ema,
             "mean_density": self.model.mean_density(),
             "peak_density": self.peak_density,
-            "throughput": self.model.exited,
+            "throughput": float(self.model.exited),
+            "cars": float(self.model.n_cars),
+            "car_speed": self.model.car_speed_ratio,
+            "queued_outside": float(self.model.queued_outside),
             "overrides": float(self.events.overrides),
         }

@@ -16,20 +16,28 @@ from .simulation import Simulation
 
 
 def compare(seconds: float, seeds: int) -> None:
-    print(f"Incident on the central link at t=120 s; {seeds} seeds x {seconds:.0f} s each.\n")
-    print(f"{'mode':<10} {'bus time lost':>14} {'jam link-s':>11} {'exited veh':>11} {'overrides':>10}")
+    print(f"Stalled vehicle blocks the central link at t=120 s; {seeds} seeds x {seconds:.0f} s each.\n")
+    print(
+        f"{'mode':<10} {'bus time lost':>14} {'car speed':>10} {'jam link-s':>11} {'cars exited':>12} {'overrides':>10}"
+    )
     for adaptive in (False, True):
-        lost = jam = thr = ovr = 0.0
+        lost = speed = jam = thr = ovr = 0.0
         for seed in range(1, seeds + 1):
             sim = Simulation(Config(seed=seed), adaptive=adaptive, incident_at=120.0)
+            roads = [s.id for s in sim.grid.segments if s.kind == "road"]
             for _ in range(int(seconds / 5)):
                 sim.run(5)
-                jam += 5 * sum(sim.model.density(i) > sim.cfg.rho_block for i in range(len(sim.grid.segments)))
+                jam += 5 * sum(sim.model.density(i) > 0.5 for i in roads)
             m = sim.metrics()
-            lost, thr, ovr = lost + m["bus_delay_ratio"], thr + m["throughput"], ovr + m["overrides"]
+            lost, speed, thr, ovr = (
+                lost + m["bus_delay_ratio"],
+                speed + m["car_speed"],
+                thr + m["throughput"],
+                ovr + m["overrides"],
+            )
         n = seeds
         name = "adaptive" if adaptive else "fixed"
-        print(f"{name:<10} {lost / n:>14.1%} {jam / n:>11.0f} {thr / n:>11.0f} {ovr / n:>10.0f}")
+        print(f"{name:<10} {lost / n:>14.1%} {speed / n:>10.0%} {jam / n:>11.0f} {thr / n:>12.0f} {ovr / n:>10.0f}")
 
 
 def run_window(sim: Simulation, screenshot: str | None, seconds: float) -> None:

@@ -1,4 +1,6 @@
-"""Headless closed-loop scenario: an incident hits the central link; compare control modes."""
+"""Headless closed-loop scenarios: physical rules hold, and an incident is handled better when adaptive."""
+
+import pytest
 
 from smartcity.config import Config
 from smartcity.simulation import Simulation
@@ -9,33 +11,79 @@ SECONDS = 600
 
 def run(seed: int, adaptive: bool):
     sim = Simulation(Config(seed=seed), adaptive=adaptive, incident_at=120.0)
-    jam_seconds = 0.0  # link-seconds spent above the spillback threshold
+    roads = [s.id for s in sim.grid.segments if s.kind == "road"]
+    jam = 0.0  # link-seconds with at least half the link occupied
     for _ in range(SECONDS // 5):
         sim.run(5)
-        jam_seconds += 5 * sum(sim.model.density(i) > sim.cfg.rho_block for i in range(len(sim.grid.segments)))
-    return sim, jam_seconds
+        jam += 5 * sum(sim.model.density(i) > 0.5 for i in roads)
+    return sim, jam
 
 
-def test_adaptive_control_contains_spillback_better_than_fixed_timer():
+@pytest.mark.parametrize("adaptive", [False, True])
+def test_vehicles_never_pass_a_red_stop_line_or_overlap(adaptive):
+    sim = Simulation(Config(seed=2), adaptive=adaptive, incident_at=100.0)
+    grid = sim.grid
+    before: dict[str, tuple[int, float]] = {}
+    for _ in range(int(400 / sim.cfg.dt)):
+        sim.step()
+        for seg in grid.segments:
+            lane = sim.model.lanes[seg.id]
+            for ahead, behind in zip(lane, lane[1:], strict=False):
+                assert behind.pos <= ahead.pos - ahead.length + 1e-6, "vehicles overlap"
+            for v in lane:
+                prev = before.get(v.id)
+                if prev and prev[0] == seg.id and prev[1] <= seg.stop_pos < v.pos and seg.signalised:
+                    assert sim.coord.signal_state(seg.id) in ("G", "Y"), f"{v.id} ran a red on seg{seg.id}"
+                before[v.id] = (seg.id, v.pos)
+
+
+def test_junction_box_is_clear_when_a_new_street_turns_green():
+    """Yellow + all-red must empty the box of anything that could conflict with the next street."""
+    sim = Simulation(Config(seed=4), adaptive=False)
+    grid, cfg = sim.grid, sim.cfg
+    last = {n: (c.current, c.phase) for n, c in sim.controllers.items()}
+    checked = still_entering = slow_leavers = 0
+    for _ in range(int(600 / cfg.dt)):
+        sim.step()
+        for n, c in sim.controllers.items():
+            now = (c.current, c.phase)
+            if now[1] == "GREEN" and last[n][1] == "ALLRED":
+                checked += 1
+                for a in c.approaches:  # vehicles between a stop line and the centre
+                    seg = grid.segments[a]
+                    still_entering += sum(1 for v in sim.model.lanes[a] if v.pos > seg.stop_pos + 0.5)
+                for sid in grid.out_seg[n]:  # vehicles in the far half of the box, on their way out
+                    if sid is not None:
+                        slow_leavers += sum(
+                            1
+                            for v in sim.model.lanes[sid]
+                            if v.pos < cfg.box_half - 0.5 and v.v < 5.0 and v.kind != "blocker"
+                        )
+            last[n] = now
+    assert checked > 100
+    assert still_entering == 0 and slow_leavers == 0
+
+
+def test_adaptive_control_helps_buses_and_contains_jams_at_a_cost_to_throughput():
     fixed = [run(s, False) for s in SEEDS]
     adaptive = [run(s, True) for s in SEEDS]
-    fixed_jam = sum(j for _, j in fixed)
-    adaptive_jam = sum(j for _, j in adaptive)
-    assert adaptive_jam < 0.8 * fixed_jam
-    # and it does not buy that by hurting the buses or throughput
-    fixed_delay = sum(s.metrics()["bus_delay_ratio"] for s, _ in fixed) / len(SEEDS)
-    adaptive_delay = sum(s.metrics()["bus_delay_ratio"] for s, _ in adaptive) / len(SEEDS)
-    assert adaptive_delay < fixed_delay * 1.03
-    fixed_thr = sum(s.metrics()["throughput"] for s, _ in fixed)
-    adaptive_thr = sum(s.metrics()["throughput"] for s, _ in adaptive)
-    assert adaptive_thr > 0.97 * fixed_thr
+
+    def mean(runs, key):
+        return sum(key(sim, jam) for sim, jam in runs) / len(runs)
+
+    lost = lambda sim, jam: sim.metrics()["bus_delay_ratio"]  # noqa: E731
+    assert mean(adaptive, lost) < mean(fixed, lost)
+    assert sum(j for _, j in adaptive) < 0.6 * sum(j for _, j in fixed)
+    exited = lambda sim, jam: sim.metrics()["throughput"]  # noqa: E731
+    assert mean(adaptive, exited) > 0.85 * mean(fixed, exited)  # the price: cars held at the gates
 
 
-def test_adaptive_run_exercises_every_decision_path_and_the_ai_feed_forward():
+def test_adaptive_run_exercises_the_decision_paths_and_the_ai_feed_forward():
     sim, _ = run(1, True)
     counts = sim.events.counts
     assert counts["INCIDENT"] == 1
     assert counts["THROTTLE"] > 0 and counts["SPLIT_ADJUST"] > 0 and counts["EARLY_SWITCH"] > 0
+    assert counts["LOCAL_EXTEND"] > 0 and counts["SPILLBACK_HOLD"] > 0
     assert counts["FORECAST"] > 0 and counts["FORECAST_RESOLVED"] > 0
     assert sim.predictor.model_name == "RIDGE"
     assert sim.api.published == len(sim.fleet.buses) * int(SECONDS / sim.cfg.dt)
@@ -44,6 +92,14 @@ def test_adaptive_run_exercises_every_decision_path_and_the_ai_feed_forward():
 def test_fixed_mode_never_overrides_the_timer():
     sim, _ = run(1, False)
     assert sim.events.overrides == 0
+
+
+def test_cars_and_buses_both_circulate():
+    sim = Simulation(Config(), adaptive=True)
+    sim.run(300)
+    kinds = {v.kind for v in sim.model.iter_vehicles()}
+    assert {"car", "bus"} <= kinds
+    assert sim.model.exited > 50 and all(b.laps >= 0 for b in sim.fleet.buses)
 
 
 def test_toggling_modes_at_runtime_is_safe():
