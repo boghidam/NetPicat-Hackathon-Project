@@ -53,6 +53,9 @@ class TrafficModel:
         self.car_speed_ratio = 1.0  # EMA of car speed / free speed
         self._ids = 0
         self._release_factor: Callable[[int], float] = lambda s: 1.0
+        self._signal_state: Callable[[int], str] = lambda s: "G"
+        # vehicles that have passed a stop line and are crossing the box: target link -> {vehicle id: source link}
+        self.in_box: dict[int, dict[str, int]] = {}
         self._seed_cars()
 
     # -- creation ------------------------------------------------------------
@@ -172,6 +175,7 @@ class TrafficModel:
     ) -> None:
         """Advance one tick. `signal_state(seg)` is 'G', 'Y' or 'R'; `release_factor` throttles cars."""
         self._release_factor = release_factor
+        self._signal_state = signal_state
         for seg_id, (_, expiry) in list(self.incidents.items()):
             if now >= expiry:
                 self.clear_incident(seg_id)
@@ -203,9 +207,12 @@ class TrafficModel:
                 if new > limit:
                     new = max(v.pos, limit)
                     v.v = (new - v.pos) / dt
-                if seg.signalised and v.pos < stop <= new and v.kind == "car":
-                    g = release_factor(seg.id)
-                    self.next_release[seg.id] = now + (1.0 / (cfg.sat_flow * g) if 0.0 < g < 1.0 else 0.0)
+                if seg.signalised and v.pos < stop <= new:
+                    if v.next_seg is not None:
+                        self.in_box.setdefault(v.next_seg, {})[v.id] = seg.id
+                    if v.kind == "car":
+                        g = release_factor(seg.id)
+                        self.next_release[seg.id] = now + (1.0 / (cfg.sat_flow * g) if 0.0 < g < 1.0 else 0.0)
                 v.pos = new
                 v.elapsed += dt
                 if v.kind == "bus":
@@ -228,10 +235,13 @@ class TrafficModel:
             return True
         dist = seg.stop_pos - v.pos
         brake_dist = v.v * v.v / (2 * self.cfg.comfort_brake)
+        left = self._turns_left(v, seg)
         if state == "Y" and v.v * v.v / (2 * self.cfg.max_brake) <= dist:
             return True  # can still stop, so it must; only vehicles too fast to stop run the yellow
         if not self._can_enter(v):
             return True  # never enter the box without room to leave it
+        if left and self._oncoming_conflict(seg):
+            return True  # yield to oncoming traffic, which is green at the same time
         if v.kind == "car":
             g = self._release_factor(seg.id)
             if g <= 0.0:
@@ -240,9 +250,30 @@ class TrafficModel:
                 return True
         return False
 
+    def _turns_left(self, v: Vehicle, seg: Segment) -> bool:
+        return v.next_seg is not None and self.grid.segments[v.next_seg].direction == seg.direction.left()
+
+    def _oncoming_conflict(self, seg: Segment) -> bool:
+        """Is oncoming traffic about to enter the box from the opposite approach?"""
+        opp_id = self.grid.in_seg[seg.to_node][seg.direction.opposite]
+        if opp_id is None:
+            return False
+        opp = self.grid.segments[opp_id]
+        for u in self.lanes[opp_id]:
+            if u.kind == "blocker" or u.pos < opp.stop_pos - 25.0:
+                continue
+            if self._turns_left(u, opp):
+                continue  # two left turns pass each other
+            if u.pos > opp.stop_pos or u.v > 1.5:  # moving toward the box, or already in it
+                return True
+        return False
+
     def _can_enter(self, v: Vehicle) -> bool:
         if v.next_seg is None:
             return True
+        # one stream at a time may merge into a link; the box is not shared by two merging streams
+        if any(src != v.seg for src in self.in_box.get(v.next_seg, {}).values()):
+            return False
         lane = self.lanes[v.next_seg]
         if not lane:
             return True
@@ -256,6 +287,7 @@ class TrafficModel:
             return
         tgt = v.next_seg
         assert tgt is not None
+        self.in_box.get(tgt, {}).pop(v.id, None)
         v.seg, v.pos = tgt, v.pos - seg.length
         self.lanes[tgt].append(v)
         if v.route is not None:

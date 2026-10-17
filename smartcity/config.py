@@ -32,7 +32,7 @@ class Config:
     lane_offset: float = 5.0  # m lateral offset so opposite directions don't overlap
 
     # --- cars ------------------------------------------------------------
-    gate_demand: float = 0.08  # veh/s entering at each gate
+    gate_demand: float = 0.12  # veh/s entering at each gate
     initial_cars: int = 70
     route_follow: float = 0.8  # chance a car takes a turn that gets it closer to its exit
     spawn_backlog_max: int = 40  # cars waiting outside a blocked gate before new ones are dropped
@@ -41,12 +41,12 @@ class Config:
     buses_per_route: int = 2
 
     # --- signals ---------------------------------------------------------
-    # One street (approach) is green at a time, in sequence; yellow then all-red clears the box.
-    base_green: float = 14.0  # s, the "standard timer" per approach
+    # Opposite streets are green together; yellow then all-red clears the box between phases.
+    base_green: float = 18.0  # s, the "standard timer" per phase
     yellow: float = 2.0
     all_red: float = 1.5
-    min_green: float = 6.0
-    max_green: float = 28.0
+    min_green: float = 8.0
+    max_green: float = 36.0
 
     # --- congestion estimator -------------------------------------------
     est_alpha: float = 0.3  # EWMA smoothing
@@ -65,7 +65,7 @@ class Config:
 
     # --- global optimisation --------------------------------------------
     rho_gate: float = 0.65  # downstream load above which releases are metered
-    rho_block: float = 0.85  # downstream load at which the movement is not served
+    rho_block: float = 0.85  # downstream load at which an approach is released at zero rate
     w_pressure: float = 0.35
     w_bus_delay: float = 0.25
     w_forecast: float = 0.20
@@ -73,6 +73,7 @@ class Config:
     w_downstream: float = 0.30
     age_full: float = 60.0  # s of red at which the age term saturates
     split_eps: float = 0.15  # keeps splits at the base timer when scores are all low
+    split_deadband: float = 0.15  # score share must differ from an even split by this much to change greens
     budget_window: float = 60.0  # s
     budget_seconds: float = 90.0  # max total extension seconds per window across the grid
     neighbour_window: float = 20.0

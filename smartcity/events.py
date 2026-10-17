@@ -13,7 +13,6 @@ OVERRIDE_KINDS = frozenset(
         "PREDICTIVE_SWITCH",
         "EARLY_SWITCH",
         "SPLIT_ADJUST",
-        "SPILLBACK_HOLD",
         "THROTTLE",
     }
 )

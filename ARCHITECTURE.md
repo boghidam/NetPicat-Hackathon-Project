@@ -1,6 +1,6 @@
 # Smart City Traffic Demo: Architecture
 
-A visual demo of city-wide adaptive traffic-signal control. Individual cars and buses share one-lane roads. The buses double as moving congestion sensors: they stream telemetry, and each intersection uses it to extend green where buses slow down and to avoid releasing traffic into congested neighbours. An AI module forecasts downstream conditions after each bus clears a light and feeds those forecasts forward so the next intersections adjust before the bus arrives.
+A visual demo of city-wide adaptive traffic-signal control. Individual cars and buses share one-lane roads, and opposite streets at a junction always share a light. The buses double as moving congestion sensors: they stream telemetry, and each intersection uses it to extend green where buses slow down and to avoid releasing traffic into congested neighbours. An AI module forecasts downstream conditions after each bus clears a light and feeds those forecasts forward so the next intersections adjust before the bus arrives.
 
 **Target:** Python 3.14 (3.14.8), `pygame-ce`, `numpy`, `pytest` (see `requirements.txt`).
 
@@ -70,26 +70,25 @@ Dependency direction (no cycles): `config` → `network` → `traffic_model` →
 
 | Junction | Where | Streets (approaches) | Phases |
 |---|---|---|---|
-| 3-way (T) | top and bottom edge nodes, the four corners | 3 | 3 |
-| 4-way | interior nodes, west/east edge nodes | 4 | 4 |
-
-The code is generic in the number of approaches: a junction with N streets runs N phases. The rectangular geometry limits the demo to four.
+| 3-way (T) | top and bottom edge nodes, the four corners | 3 | 2: the two through streets together, then the stem |
+| 4-way | interior nodes, west/east edge nodes | 4 | 2: N+S together, then E+W together |
 
 **Stop line and junction box.** Each segment runs centre to centre, but vehicles must stop at the *stop line*, 14 m (`box_half`) before the centre of the intersection they approach. The square between the stop lines is the junction box. While a light is red, nothing may pass its stop line and enter the box.
 
-**Phases: one street at a time.** Each approach has its own light. For a 3-way junction:
+**Phases: opposite streets together.** Each approach has its own light, and the lights of *opposite* approaches always show the same colour: when one turns green the one facing it turns green, and when one is red the opposite one is red too. An approach with no opposite (the stem of a T-junction) has a phase of its own. At a 4-way junction the sequence is:
 
-1. Light 1 green: street 1 may go straight or turn into streets 2 or 3. Lights 2 and 3 stay red.
-2. Light 2 green; lights 1 and 3 red.
-3. Light 3 green; lights 1 and 2 red.
+1. N and S green (E and W red).
+2. E and W green (N and S red).
 
-A 4-way junction does the same with four lights. Between phases, **yellow** (2 s) is followed by **all-red** (1.5 s) so the box empties before the next street starts. The standard timer gives each street 14 s of green. Phase state is `GREEN → YELLOW → ALLRED → next approach`.
+and at a T-junction, e.g. with streets from W, E and S: W+E green with S red, then S green with W and E red. Between phases, **yellow** (2 s) is followed by **all-red** (1.5 s) so the box empties before the next phase starts. The standard timer gives each phase 18 s of green. Phase state is `GREEN → YELLOW → ALLRED → next phase`. The code groups approaches with `CityGrid.phase_groups`.
 
 **Vehicle rules** (enforced in `TrafficModel`, identically in fixed and adaptive mode):
 
 - *Red:* a vehicle holds at the stop line.
 - *Yellow:* a vehicle stops if it can still do so with maximum braking; only vehicles too fast to stop continue.
 - *Green:* a vehicle crosses only if the first part of its next link has room for it, so nobody enters the box without room to leave it. A queue spilling back to a junction therefore blocks that approach even on green, which is how spillback arises.
+- *Left turns:* both opposite streets are green together, so a left-turning vehicle yields: it holds at the line while oncoming traffic is moving toward the box or already in it. Two left turns from opposite sides pass each other.
+- *Merging:* two streams turning into the same link are never in the box at once; the second waits at its line.
 - *Following:* a vehicle keeps a safe distance behind the one ahead (`v <= sqrt(2 * a_comfort * room)`), so queues form and dissolve naturally.
 - *Throttle:* when the coordinator meters an approach, cars (not buses) are released no faster than `sat_flow * g`.
 
@@ -194,15 +193,15 @@ Greedy local optimisation has a known failure mode: clearing intersection A simp
    g      = 1 if excess <= 0 else clamp(1 - excess / (rho_block - rho_gate), 0, 1)     # rho_gate 0.65, rho_block 0.85
    ```
 
-   Loads come from bus telemetry and forecasts. Each throttle is logged. *Why relative:* an early version metered whenever the next link looked busy. Under uniform congestion that wasted green on links that were draining fine and cut throughput, so it was changed.
+   Loads come from bus telemetry and forecasts. Each throttle is logged. Buses cannot overtake the cars they share a lane with, so metering cars would hold up a bus queued behind them; the throttle is therefore waived on any approach with a bus within 120 m of its stop line. *Why relative:* an early version metered whenever the next link looked busy. Under uniform congestion that wasted green on links that were draining fine and cut throughput, so it was changed.
 
-2. **Spillback guard.** An approach is *blocked* when the worst link it feeds has estimated load `>= rho_block`. A blocked street is skipped when the next phase is chosen (as long as another street can still discharge), and a blocked green is cut short after `min_green`. A phase that is about to start on a blocked street gets only `min_green`. (The world additionally enforces the physics: nobody enters the box without room to leave it.)
+2. **Physical spillback.** The world, not the controller, enforces that nobody enters the box without room to leave it, so a queue that reaches a junction blocks that approach whether or not its light is green. (An earlier version also had the controller skip or cut short phases whose exits looked full. In the paired-phase design that only wasted green and cost buses a couple of points without reducing jams, so it was removed.)
 
 3. **Neighbour-aware scoring.** `downstream_load` is part of the score (`-w_n`), so green drifts away from streets feeding trouble before the hard rule triggers.
 
 4. **Extension budget.** The coordinator caps total extension seconds for the grid per rolling window and damps extensions at intersections whose neighbours have just extended. This stops the "everyone extends, nothing clears" pathology.
 
-5. **Anti-starvation.** The `age` term grows while a street waits, `max_green` caps every phase, and phases rotate in a fixed order (with skips only for blocked streets and predictive jumps), so every street is served.
+5. **Anti-starvation.** The `age` term grows while a street waits, `max_green` caps every phase, and phases rotate in a fixed order (except a predictive jump to a waiting phase), so every street is served.
 
 6. **Hysteresis.** `min_green`, the fixed yellow and all-red intervals, and an override cooldown prevent flapping caused by noisy speed samples.
 
@@ -259,7 +258,7 @@ Because the regression shrinks toward the network mean, predicted densities are 
 - 18 buses (9 loops, 2 buses each): the perimeter in both directions, the inner ring in both directions, rows and columns as out-and-back lines, and a wide rectangle. Buses share the road with cars, queue at the same lights and are held by the same junction rules.
 - Each tick it publishes one `BusTelemetry` per bus: ID, coordinates, distance to the next intersection (to its stop line), speed, and accumulated delay. Consumers `subscribe`, and a bounded ring buffer keeps the latest records for the HUD.
 - Deterministic given a seed.
-- Cars are *not* in the API. They appear at the eight gates at random (Poisson, 0.08 veh/s per gate), each with a random exit gate, steer toward it (80% of the time they take a turn that gets them closer) and leave at the exit.
+- Cars are *not* in the API. They appear at the eight gates at random (Poisson, 0.12 veh/s per gate), each with a random exit gate, steer toward it (80% of the time they take a turn that gets them closer) and leave at the exit.
 - An **incident** ("stalled vehicle") parks a vehicle mid-link for 150 s. On a one-lane road nobody can overtake, so the lane is blocked, a queue builds, and buses report it.
 
 ---
@@ -278,7 +277,7 @@ Because the regression shrinks toward the network mean, predicted densities are 
 **HUD overlay panels:**
 1. *API stream*: telemetry lines for eight buses, refreshed at about 4 Hz.
 2. *AI predictions*: model, MAE, upcoming forecasts, recent outcomes.
-3. *Overrides*: every time the algorithm overrides the standard timer, with the reason: `EXTEND`, `PRED-EXT`, `PRED-SW`, `EARLY`, `SPLIT`, `THROTTLE`, `SPILLBACK`.
+3. *Overrides*: every time the algorithm overrides the standard timer, with the reason: `EXTEND`, `PRED-EXT`, `PRED-SW`, `EARLY`, `SPLIT`, `THROTTLE`.
 4. *Metrics*: bus time lost, cars in the network and their speed, cars exited, cars queued at the gates, override count.
 
 **Keys.** `B` toggles adaptive control vs. the fixed-timer baseline, `Space` pauses, `I` triggers the incident, `1`/`2`/`4`/`8` set speed, `H` cycles the heat layer, `R` resets, `Q` quits.
@@ -290,11 +289,11 @@ Because the regression shrinks toward the network mean, predicted densities are 
 Because the core is headless, `pytest` needs no display.
 
 - **Network:** junction types (3-way and 4-way), approach ordering, stop line set back from the centre, turn options with no U-turns, T-junction turns, car routing reaches its exit.
-- **World rules:** stops at the line on red and not in the box; proceeds on green; keeps a gap in a queue; waits at the line when the exit is full; yellow lets only too-fast vehicles through; throttle spaces cars but not buses; a stalled vehicle blocks the lane and then clears; cars enter and leave at gates.
-- **Signals:** a 3-way junction runs 3 phases and a 4-way one 4; only one street is ever non-red; phases rotate in order with yellow then all-red between them; fixed timers never override.
-- **Controller logic:** local extension, caps, budget and neighbour damping, throttle and spillback guard, skipping blocked streets, predictive extension and switch, score-driven splits.
+- **World rules:** stops at the line on red and not in the box; proceeds on green; keeps a gap in a queue; waits at the line when the exit is full; yellow lets only too-fast vehicles through; throttle spaces cars but not buses; left turns yield to moving oncoming traffic; two merging streams never share the box; a stalled vehicle blocks the lane and then clears; cars enter and leave at gates.
+- **Signals:** opposite streets always show the same light, at every junction at every tick; only one phase is ever non-red; the T-junction pairs its through streets and gives the stem its own phase; every street is served in a cycle; yellow then all-red separate phases; fixed timers never override.
+- **Controller logic:** local extension, caps, budget and neighbour damping, the throttle (and its waiver when a bus is queued behind the cars), predictive extension and switch, score-driven splits.
 - **Invariants over whole runs (both control modes):** no vehicle ever crosses a stop line on red, no two vehicles on a link ever overlap, and the junction box holds no conflicting vehicle whenever a new street turns green.
-- **Outcome:** with the incident enabled, adaptive control loses less bus time and spends far fewer link-seconds jammed, while keeping throughput within 15% of the fixed timer.
+- **Outcome:** with the incident enabled (8 seeds), adaptive control spends at least 30% fewer link-seconds jammed, with bus delay within 3 points and throughput within 5% of the fixed timer.
 - **Smoke tests:** the renderer draws every heat mode, the interactive loop handles every key and quits cleanly, and screenshot mode writes a PNG, all under `SDL_VIDEODRIVER=dummy`.
 
 ---
@@ -305,15 +304,17 @@ Because the core is headless, `pytest` needs no display.
 
 | mode | bus time lost | car speed (share of free) | link-seconds half-occupied | cars exited | overrides |
 |---|---|---|---|---|---|
-| fixed timers | 65.7% | 32% | 68 | 287 | 0 |
-| adaptive | 61.8% | 30% | 8 | 275 | 271 |
+| fixed timers | 49.2% | 34% | 202 | 404 | 0 |
+| adaptive | 50.2% | 35% | 94 | 408 | 223 |
 
-- Adaptive control cuts the share of time buses lose by about 4 points and nearly eliminates half-jammed links. Turning every adaptive feature off reproduces the fixed-timer numbers exactly. The local bus-triggered extensions alone give about 2 points and leave car throughput unchanged; the score-sized greens, early switches, throttle and spillback guard add the rest and most of the jam reduction.
-- **It costs cars something.** Over 8 seeds, cars exited fall about 4% and car speed about 6% at the default demand. At lighter or heavier demand (0.06 and 0.12 veh/s per gate) exits fall about 9%. Part of that is metering holding cars at the gates instead of letting them into a stressed network, and part is green time taken from other streets for buses and for shorter, more frequent phases (each phase change costs 3.5 s of yellow and all-red).
+- **What it does well:** at this demand adaptive control more than halves the time links spend half-jammed, at the same throughput and car speed. The helpful parts are the car throttle (the relative backpressure rule) and the extensions for slow buses. With everything adaptive switched off the results match the fixed timer exactly.
+- **What it does not do:** it does **not** make buses faster. Bus time lost is about the same (+1 point here, within noise) and was a few points *worse* at light demand (0.08 veh/s per gate: fixed 43%, adaptive 46%) because shuffling greens costs lost time (each phase change spends 3.5 s on yellow and all-red). At heavy demand (0.16) the jam reduction shrinks to about 15% and throughput is about 4% lower.
+- **Removed after measuring.** An earlier spillback guard (skip or cut short phases whose exits looked full) cost buses a couple of points and did not reduce jams in the paired-phase design, so it was dropped. The score-sized greens now have a dead-band so they only change the standard timer when the scores clearly differ.
+- **The throttle has a side effect on buses.** Buses cannot overtake the cars they share a lane with, so metering cars could hold up a bus queued behind them. The throttle is waived on any approach with a bus near its stop line.
+- **Left turns are the weak spot of paired phases.** With one lane per approach, a left-turner waiting for a gap holds up the cars behind it. That makes the fixed-timer baseline more jam-prone than a design with left-turn lanes would be.
 - **Predictive overrides are rare.** The forecast model works (it moves from EWMA to ridge, with a speed MAE of roughly 0.5-1.5 m/s) but regresses to the mean, so it seldom predicts anything dense enough to act on. Most of the benefit comes from the reactive features.
 - **ETA error is large (roughly 15-25 s)** because the forecast ETA assumes the bus keeps moving, while real arrivals include waiting at red.
-- **One street at a time is slow.** A 4-way junction gives each street a quarter of the cycle, so cars average about a third of free-flow speed even without incidents. That is a property of the requested signal scheme, not a bug.
-- The world is microscopic but simple: one lane per direction, no lane changing, no pedestrians, and vehicles that must stop for red or the box brake rather abruptly at times. Absolute numbers are illustrative, not calibrated.
+- The world is microscopic but simple: one lane per direction, no lane changing, no pedestrians, no collision physics inside the box (vehicles that cross paths in it are not detected), and abrupt braking at times. Absolute numbers are illustrative, not calibrated.
 - Bus-only sensing means unvisited links have no fresh data. Confidence decays toward a neutral prior, so the controllers see the *neighbourhood of the buses*, not the whole city.
 - Weights and thresholds are hand-tuned on a handful of seeds, not optimised. Junctions with more than four streets would need non-rectangular geometry.
 - Green-wave signal offsets are out of scope.

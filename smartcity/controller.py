@@ -1,14 +1,14 @@
 """Signal control: per-intersection phase machines and the network-wide coordinator.
 
-Each intersection serves one approach (street) at a time, in sequence: green for approach 1
-while all others stay red, then yellow, a short all-red interval to clear the junction box,
-then approach 2, and so on. A 3-way junction therefore runs 3 phases and a 4-way one 4.
+Each intersection serves one *phase* at a time: opposite streets are green together (and red
+together), an unpaired street (the stem of a T-junction) has a phase of its own. Every green is
+followed by yellow and a short all-red interval that clears the junction box, then the next phase.
+A 4-way junction runs 2 phases (N+S, then E+W); a T-junction runs 2 (E+W, then the stem).
 
 The coordinator is where the global optimisation lives. It turns bus-derived congestion
 estimates and AI forecasts into per-segment loads, and from those into (a) a throttle on how
-fast each approach may release cars, (b) a spillback guard that skips or cuts approaches
-whose exits are full, (c) dynamic phase scores that size each green, and (d) a grid-wide
-budget on green extensions.
+fast each approach may release cars, (b) dynamic phase scores that size each green and can end
+one early, and (c) a grid-wide budget on green extensions.
 """
 
 from __future__ import annotations
@@ -106,6 +106,10 @@ class NetworkCoordinator:
             excess = worst - max(cfg.rho_gate, self.load[seg.id])
             g = 1.0 - excess / (cfg.rho_block - cfg.rho_gate) if excess > 0.0 else 1.0
             g = max(0.0, min(1.0, g))
+            # Buses share the single lane with the cars and cannot pass them, so metering cars
+            # would hold up a bus queued behind them: leave an approach alone while one is close.
+            if any(t.dist_to_next_node <= cfg.d_trigger for t in self._by_seg.get(seg.id, ())):
+                g = 1.0
             self.throttle[seg.id] = g
             self._log_throttle(now, seg.id, g)
 
@@ -140,10 +144,6 @@ class NetworkCoordinator:
         return self.throttle[seg_id] if self.adaptive else 1.0
 
     # -- scoring -------------------------------------------------------------
-    def blocked(self, seg_id: int) -> bool:
-        """True when this approach would release into a (nearly) full link."""
-        return self.dload[seg_id] >= self.cfg.rho_block
-
     def slow_bus(self, seg_id: int) -> BusTelemetry | None:
         cfg = self.cfg
         worst: BusTelemetry | None = None
@@ -179,17 +179,33 @@ class NetworkCoordinator:
             seg_id, pressure, bus_delay, forecast, cfg.w_downstream * self.dload[seg_id], cfg.w_age * age, total
         )
 
-    def plan_green(self, node: int, seg_id: int, now: float) -> tuple[float, str]:
+    # -- phases are groups of opposite approaches -----------------------------
+    def label_group(self, group: list[int]) -> str:
+        node = self.grid.segments[group[0]].to_node
+        return f"n{node}/" + "+".join(self.grid.segments[a].from_side.name for a in group)
+
+    def group_score(self, group: list[int], now: float) -> Score:
+        return max((self.score(a, now) for a in group), key=lambda sc: sc.total)
+
+    def slow_bus_group(self, group: list[int]) -> BusTelemetry | None:
+        slow = [t for a in group if (t := self.slow_bus(a)) is not None]
+        return min(slow, key=lambda t: t.speed, default=None)
+
+    def forecasts_for_group(self, group: list[int], now: float) -> list[Forecast]:
+        return sorted((f for a in group for f in self.forecasts_for(a, now)), key=lambda f: f.eta)
+
+    def plan_green(self, node: int, gi: int, now: float) -> tuple[float, str]:
         """Green duration for the phase that is about to start, and a note on why it differs."""
         cfg = self.cfg
         if not self.adaptive:
             return cfg.base_green, ""
-        approaches = self.controllers[node].approaches
-        if self.blocked(seg_id) and any(not self.blocked(a) for a in approaches if a != seg_id):
-            return cfg.min_green, "exit full"
-        weights = {a: max(0.0, self.score(a, now).total) + cfg.split_eps for a in approaches}
-        share = weights[seg_id] / sum(weights.values())
-        planned = max(cfg.min_green, min(cfg.max_green, cfg.base_green * len(approaches) * share))
+        groups = self.controllers[node].groups
+        weights = [max(0.0, self.group_score(g, now).total) + cfg.split_eps for g in groups]
+        share = weights[gi] / sum(weights)
+        even = 1.0 / len(groups)
+        if abs(share - even) < cfg.split_deadband:
+            return cfg.base_green, ""  # scores too close to call: keep the standard timer
+        planned = max(cfg.min_green, min(cfg.max_green, cfg.base_green * len(groups) * share))
         return planned, f"score share {share:.0%}"
 
     # -- extension budget ------------------------------------------------------
@@ -215,19 +231,21 @@ class NetworkCoordinator:
 
 
 class IntersectionController:
-    """Sequential one-street-at-a-time signal with a standard timer and adaptive overrides."""
+    """Phase signal: opposite streets share a green; standard timer plus adaptive overrides."""
 
     def __init__(self, node: int, grid: CityGrid, cfg: Config, coord: NetworkCoordinator, events: EventLog):
         self.node, self.grid, self.cfg, self.coord, self.events = node, grid, cfg, coord, events
-        self.approaches: list[int] = [s.id for s in grid.approaches(node)]
-        n = len(self.approaches)
-        self.idx = node % n  # which approach is being served
+        self.groups: list[list[int]] = grid.phase_groups(node)
+        self.approaches: list[int] = [a for g in self.groups for a in g]
+        self._group_of = {a: gi for gi, g in enumerate(self.groups) for a in g}
+        n = len(self.groups)
+        self.idx = node % n  # which phase is being served
         self.phase = "GREEN"  # GREEN, YELLOW or ALLRED
         self.elapsed = float((node * 3) % int(cfg.base_green))
         self.planned = cfg.base_green
         self.extended_by = 0.0
         self.reason = "BASE"
-        self._became_red = {a: (0.0 if a != self.current else math.inf) for a in self.approaches}
+        self._became_red = {gi: (0.0 if gi != self.idx else math.inf) for gi in range(n)}
         self._cooldown_until = 0.0
         self._acc = 0.0
         self._used_forecasts: set[int] = set()
@@ -235,16 +253,18 @@ class IntersectionController:
 
     # -- queries -----------------------------------------------------------
     @property
-    def current(self) -> int:
-        return self.approaches[self.idx]
+    def current(self) -> list[int]:
+        """The approaches that currently have (or are finishing) the green."""
+        return self.groups[self.idx]
 
     def state_for(self, seg_id: int) -> str:
-        if seg_id != self.current:
+        if self._group_of.get(seg_id) != self.idx:
             return "R"
         return {"GREEN": "G", "YELLOW": "Y", "ALLRED": "R"}[self.phase]
 
     def red_time(self, seg_id: int, now: float) -> float:
-        return 0.0 if seg_id == self.current else max(0.0, now - self._became_red.get(seg_id, now))
+        gi = self._group_of[seg_id]
+        return 0.0 if gi == self.idx else max(0.0, now - self._became_red[gi])
 
     @property
     def remaining(self) -> float:
@@ -256,7 +276,7 @@ class IntersectionController:
         if self.phase == "YELLOW":
             if self.elapsed >= self.cfg.yellow:
                 self.phase, self.elapsed = "ALLRED", 0.0
-                self._became_red[self.current] = now
+                self._became_red[self.idx] = now
             return
         if self.phase == "ALLRED":
             if self.elapsed >= self.cfg.all_red:
@@ -271,36 +291,22 @@ class IntersectionController:
             self.phase, self.elapsed = "YELLOW", 0.0
 
     def _advance(self, now: float) -> None:
-        n = len(self.approaches)
+        n = len(self.groups)
         nxt = (self.idx + 1) % n
         if self._next_override is not None:
             nxt = self._next_override
-        elif self.coord.adaptive:
-            for k in range(1, n + 1):  # skip approaches whose exits are full
-                cand = (self.idx + k) % n
-                if not self.coord.blocked(self.approaches[cand]):
-                    if cand != nxt:
-                        self.events.add(
-                            now,
-                            "SPILLBACK_HOLD",
-                            f"{self.coord.label(self.approaches[nxt])} skipped: its exits are full "
-                            f"(load >= {self.cfg.rho_block:.2f}), serving {self.coord.label(self.approaches[cand])}",
-                            node=self.node,
-                        )
-                        nxt = cand
-                    break
         self._next_override = None
         self.idx = nxt
         self.phase, self.elapsed, self.extended_by, self.reason = "GREEN", 0.0, 0.0, "BASE"
-        self._became_red[self.current] = math.inf
-        self.planned, why = self.coord.plan_green(self.node, self.current, now)
+        self._became_red[self.idx] = math.inf
+        self.planned, why = self.coord.plan_green(self.node, self.idx, now)
         if self.coord.adaptive and abs(self.planned - self.cfg.base_green) >= 3.0:
             self.reason = "SPLIT_ADJUST"
             if abs(self.planned - self.cfg.base_green) >= 7.0:  # keep the log readable
                 self.events.add(
                     now,
                     "SPLIT_ADJUST",
-                    f"{self.coord.label(self.current)} green {self.planned:.0f}s instead of "
+                    f"{self.coord.label_group(self.current)} green {self.planned:.0f}s instead of "
                     f"{self.cfg.base_green:.0f}s ({why})",
                     node=self.node,
                 )
@@ -308,24 +314,12 @@ class IntersectionController:
     # -- adaptive decisions ----------------------------------------------------
     def _decide(self, now: float) -> None:
         cfg, coord, cur = self.cfg, self.coord, self.current
-        name = coord.label(cur)
-        blocked = coord.blocked(cur)
-        slow = coord.slow_bus(cur)
-        others = [a for a in self.approaches if a != cur]
+        name = coord.label_group(cur)
+        slow = coord.slow_bus_group(cur)
+        others = [(gi, g) for gi, g in enumerate(self.groups) if gi != self.idx]
 
-        # 1. Spillback guard: never keep serving an approach whose exits are full.
-        if blocked and self.elapsed >= cfg.min_green and any(not coord.blocked(a) for a in others):
-            coord.log_once(
-                now,
-                "SPILLBACK_HOLD",
-                self.node,
-                f"{name} green cut short: its exits are full (load >= {cfg.rho_block:.2f})",
-            )
-            self.planned = self.elapsed
-            return
-
-        # 2. Local optimisation: a slow bus near the stop line earns more green.
-        if slow is not None and not blocked and now >= self._cooldown_until and self.remaining < cfg.ext_remaining:
+        # 1. Local optimisation: a slow bus near the stop line earns more green.
+        if slow is not None and now >= self._cooldown_until and self.remaining < cfg.ext_remaining:
             want = cfg.ext_gain * (1.0 - slow.speed / (cfg.v_slow_frac * slow.free_speed))
             self._extend(
                 now,
@@ -334,12 +328,12 @@ class IntersectionController:
                 f"{slow.bus_id} at {slow.speed:.1f} m/s, {slow.dist_to_next_node:.0f} m from line",
             )
 
-        # 3. Feed-forward: forecasts for buses that have not arrived yet.
-        for f in coord.forecasts_for(cur, now):
+        # 2. Feed-forward: forecasts for buses that have not arrived yet.
+        for f in coord.forecasts_for_group(cur, now):
             if f.id in self._used_forecasts or f.predicted_density < cfg.pred_density_min or f.confidence < 0.3:
                 continue
             until = f.eta - now
-            if until <= cfg.lead_window and self.remaining < until + 3.0 and not blocked:
+            if until <= cfg.lead_window and self.remaining < until + 3.0:
                 self._used_forecasts.add(f.id)
                 self._extend(
                     now,
@@ -351,32 +345,32 @@ class IntersectionController:
                 break
 
         if self.elapsed >= cfg.min_green and slow is None and self.remaining > 1.0:
-            for a in others:  # a dense forecast on another street: serve it next
-                for f in coord.forecasts_for(a, now):
+            for gi, g in others:  # a dense forecast on another street: serve it next
+                for f in coord.forecasts_for_group(g, now):
                     if f.id in self._used_forecasts or f.predicted_density < cfg.pred_density_min or f.confidence < 0.3:
                         continue
                     until = f.eta - now
-                    if until <= cfg.lead_window and not coord.blocked(a):
+                    if until <= cfg.lead_window:
                         self._used_forecasts.add(f.id)
-                        self._next_override = self.approaches.index(a)
+                        self._next_override = gi
                         self.events.add(
                             now,
                             "PREDICTIVE_SWITCH",
                             f"{name} green cut short: forecast dense traffic ({f.predicted_density:.2f}) "
-                            f"for {f.source_bus} on {coord.label(a)} in {until:.0f}s",
+                            f"for {f.source_bus} on {coord.label_group(g)} in {until:.0f}s",
                             node=self.node,
                         )
                         self.planned = self.elapsed
                         return
 
-            # 4. Dynamic weighting: end this green early if the next street clearly needs it more.
-            nxt = self.approaches[(self.idx + 1) % len(self.approaches)]
-            mine, theirs = coord.score(cur, now), coord.score(nxt, now)
-            if theirs.total - mine.total >= cfg.early_switch_margin and not coord.blocked(nxt):
+            # 3. Dynamic weighting: end this green early if the next phase clearly needs it more.
+            nxt = self.groups[(self.idx + 1) % len(self.groups)]
+            mine, theirs = coord.group_score(cur, now), coord.group_score(nxt, now)
+            if theirs.total - mine.total >= cfg.early_switch_margin:
                 self.events.add(
                     now,
                     "EARLY_SWITCH",
-                    f"{name} green ended early: {coord.label(nxt)} score {theirs.total:.2f} vs {mine.total:.2f}",
+                    f"{name} green ended early: {coord.label_group(nxt)} score {theirs.total:.2f} vs {mine.total:.2f}",
                     node=self.node,
                 )
                 self.planned = self.elapsed
@@ -392,4 +386,4 @@ class IntersectionController:
         self.planned += granted
         self.extended_by += granted
         self.reason = kind
-        self.events.add(now, kind, f"{self.coord.label(self.current)} +{granted:.1f}s ({detail})", node=self.node)
+        self.events.add(now, kind, f"{self.coord.label_group(self.current)} +{granted:.1f}s ({detail})", node=self.node)

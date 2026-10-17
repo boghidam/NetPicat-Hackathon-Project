@@ -151,3 +151,43 @@ def test_density_is_occupied_fraction_of_link():
     assert w.density(seg) == 0.0
     put(w, seg, 50.0)
     assert w.density(seg) == pytest.approx((cfg.car_length + cfg.min_gap) / 200.0)
+
+
+def test_left_turner_yields_to_moving_oncoming_traffic_then_goes():
+    cfg, grid, w = make()
+    west = grid.segments[road(grid, 4, 5)]  # eastbound into node 5
+    east = grid.segments[road(grid, 6, 5)]  # westbound into node 5: the oncoming approach
+    left_target = grid.out_seg[5][west.direction.left()]  # northbound out of node 5
+    straight = grid.straight_next(east.id)
+    left = put(w, west.id, west.stop_pos - 3.0, v=0.0, next_seg=left_target)
+    oncoming = put(w, east.id, east.stop_pos - 12.0, v=10.0, next_seg=straight)
+    w.step(0.0, cfg.dt, lambda s: "G", lambda s: 1.0)
+    assert left.pos <= west.stop_pos  # held at the line while a car bears down on the box
+    run(w, 10, state="G")
+    assert oncoming.seg == straight and left.seg == left_target  # then it turns once the road is clear
+
+
+def test_two_left_turns_from_opposite_sides_do_not_block_each_other():
+    cfg, grid, w = make()
+    a = grid.segments[road(grid, 4, 5)]
+    b = grid.segments[road(grid, 6, 5)]
+    va = put(w, a.id, a.stop_pos - 3.0, next_seg=grid.out_seg[5][a.direction.left()])
+    vb = put(w, b.id, b.stop_pos - 3.0, next_seg=grid.out_seg[5][b.direction.left()])
+    run(w, 15, state="G")
+    assert va.seg != a.id and vb.seg != b.id
+
+
+def test_streams_merging_into_the_same_link_take_turns_in_the_box():
+    cfg, grid, w = make()
+    a = grid.segments[road(grid, 1, 5)]  # southbound into node 5, turning right (west)
+    b = grid.segments[road(grid, 9, 5)]  # northbound into node 5, turning left (west)
+    target = grid.out_seg[5][a.direction.right()]
+    assert grid.out_seg[5][b.direction.left()] == target
+    va = put(w, a.id, a.stop_pos - 1.0, v=4.0, next_seg=target)
+    vb = put(w, b.id, b.stop_pos - 1.0, v=4.0, next_seg=target)
+    for i in range(int(20 / cfg.dt)):
+        w.step(i * cfg.dt, cfg.dt, lambda s: "G", lambda s: 1.0)
+        lane = w.lanes[target]
+        for ahead, behind in zip(lane, lane[1:], strict=False):
+            assert behind.pos <= ahead.pos - ahead.length + 1e-6
+    assert va.seg != a.id and vb.seg != b.id  # both got through, one after the other

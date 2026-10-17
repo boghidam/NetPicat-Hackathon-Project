@@ -16,7 +16,7 @@ BOX_FILL = (66, 70, 84)
 STOP_LINE = {"G": (70, 230, 110), "Y": (250, 205, 50), "R": (235, 60, 60)}
 CAR = (120, 165, 215)
 CAR_OUTLINE = (20, 30, 45)
-RING_KINDS = {"LOCAL_EXTEND", "PREDICTIVE_EXTEND", "PREDICTIVE_SWITCH", "THROTTLE", "SPILLBACK_HOLD", "EARLY_SWITCH"}
+RING_KINDS = {"LOCAL_EXTEND", "PREDICTIVE_EXTEND", "PREDICTIVE_SWITCH", "THROTTLE", "EARLY_SWITCH"}
 
 
 def lerp(a: tuple[int, int, int], b: tuple[int, int, int], k: float) -> tuple[int, int, int]:
@@ -165,7 +165,7 @@ class CityView:
             ("LOCAL_EXTEND", "reactive green extension"),
             ("PREDICTIVE_EXTEND", "AI predictive override"),
             ("THROTTLE", "downstream throttle"),
-            ("SPILLBACK_HOLD", "spillback guard"),
+            ("EARLY_SWITCH", "early switch to next phase"),
         ]
         base = self.rect.bottom - 14 * len(left) - 10
         for i, (text, c) in enumerate(left):

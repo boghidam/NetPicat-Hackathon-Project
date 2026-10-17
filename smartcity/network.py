@@ -142,6 +142,19 @@ class CityGrid:
         found = [self.segments[sid] for sid in self.in_seg[node] if sid is not None]
         return sorted(found, key=lambda s: s.from_side)
 
+    def phase_groups(self, node: int) -> list[list[int]]:
+        """Approaches that share a green: opposite streets together, an unpaired street alone.
+
+        4-way junction -> [[N, S], [E, W]]; T-junction -> e.g. [[S], [E, W]].
+        """
+        by_side = {s.from_side: s.id for s in self.approaches(node)}
+        groups = []
+        for side in (Dir.N, Dir.E):
+            ids = [by_side[d] for d in (side, side.opposite) if d in by_side]
+            if ids:
+                groups.append(ids)
+        return groups
+
     def turn_targets(self, seg_id: int) -> list[tuple[int, float]]:
         """Where vehicles leaving this segment can go (never a U-turn), with their share."""
         return self._turns[seg_id]
