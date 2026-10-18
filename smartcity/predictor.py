@@ -91,6 +91,12 @@ class PostIntersectionPredictor:
     def active(self, now: float) -> list[Forecast]:
         return sorted((f for f in self._active.values() if f.expires_at > now), key=lambda f: f.eta)
 
+    def forget(self, bus_id: str) -> None:
+        """A bus left the map: drop its history and its forecasts."""
+        self._tracks.pop(bus_id, None)
+        for fid in [f.id for f in self._active.values() if f.source_bus == bus_id]:
+            del self._active[fid]
+
     # -- telemetry intake --------------------------------------------------
     def on_telemetry(self, tel: BusTelemetry) -> None:
         track = self._tracks.get(tel.bus_id)

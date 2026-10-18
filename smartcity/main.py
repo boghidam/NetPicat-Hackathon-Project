@@ -3,6 +3,8 @@
 python -m smartcity.main                       # interactive window (Iași, central transit spine)
 python -m smartcity.main --incident-at 60      # stall a vehicle on the busiest bus corridor after 60 s
 python -m smartcity.main --map grid            # the small synthetic city instead
+python -m smartcity.main --traffic 300         # three times the normal cars and buses (0 to 1000)
+python -m smartcity.main --rush "Podu Roș"     # start with a key point under rush-hour pressure
 python -m smartcity.main --compare             # headless fixed-timer vs adaptive table
 python -m smartcity.main --screenshot out.png --seconds 200 --incident-at 60
 """
@@ -10,6 +12,7 @@ python -m smartcity.main --screenshot out.png --seconds 200 --incident-at 60
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import time
 
@@ -52,6 +55,14 @@ def compare(
         n = seeds
         name = "adaptive" if adaptive else "fixed"
         print(f"{name:<10} {lost / n:>14.1%} {speed / n:>10.0%} {jam / n:>11.0f} {thr / n:>12.0f} {ovr / n:>12.0f}")
+
+
+def apply_start_options(sim: Simulation, traffic: float | None, rush: str | None) -> None:
+    """Start (or restart) a simulation at a given traffic amount and with a key point under rush-hour pressure."""
+    if traffic is not None:
+        sim.set_traffic_percent(traffic)
+    if rush is not None:
+        sim.set_rush_point(rush)
 
 
 def run_window(sim: Simulation, screenshot: str | None, seconds: float) -> None:
@@ -97,6 +108,7 @@ def run_window(sim: Simulation, screenshot: str | None, seconds: float) -> None:
     acc = 0.0
     wall = 0.0
     dragging = False
+    press_pos: tuple[int, int] | None = None
     running = True
     pan_step = 40
     while running:
@@ -109,8 +121,14 @@ def run_window(sim: Simulation, screenshot: str | None, seconds: float) -> None:
                 city.zoom(pygame.mouse.get_pos(), 1.15**ev.y)
             elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
                 dragging = city.rect.collidepoint(ev.pos)
+                press_pos = ev.pos
             elif ev.type == pygame.MOUSEBUTTONUP and ev.button == 1:
                 dragging = False
+                if press_pos is not None and math.dist(press_pos, ev.pos) < 5:  # a click, not a drag
+                    name = city.landmark_at(ev.pos)
+                    if name is not None:  # click a key point to put it under rush-hour pressure (again to lift it)
+                        sim.set_rush_point(None if sim.rush_point == name else name)
+                press_pos = None
             elif ev.type == pygame.MOUSEMOTION and dragging:
                 city.drag(ev.rel)
             elif ev.type == pygame.KEYDOWN:
@@ -140,8 +158,18 @@ def run_window(sim: Simulation, screenshot: str | None, seconds: float) -> None:
                     city.drag((0, pan_step))
                 elif ev.key == pygame.K_DOWN:
                     city.drag((0, -pan_step))
+                elif ev.key == pygame.K_RIGHTBRACKET:
+                    sim.step_traffic(+1)
+                elif ev.key == pygame.K_LEFTBRACKET:
+                    sim.step_traffic(-1)
+                elif ev.key == pygame.K_BACKSLASH:
+                    sim.set_traffic_percent(100)
+                elif ev.key == pygame.K_k:
+                    sim.cycle_rush_point(-1 if ev.mod & pygame.KMOD_SHIFT else 1)
                 elif ev.key == pygame.K_r:
+                    settings = (sim.traffic_percent, sim.rush_point)  # a reset keeps the traffic settings
                     sim = Simulation(sim.cfg, adaptive=sim.adaptive, incident_at=sim.incident_at, net=sim.net)
+                    apply_start_options(sim, *settings)
                     ui.rows = snapshot_buses(sim)
                     acc = 0.0
                     wall = 0.0
@@ -175,6 +203,20 @@ def main() -> None:
         default=None,
         help=f"cars per second entering at each gate (default {Config().gate_demand})",
     )
+    ap.add_argument(
+        "--traffic",
+        type=float,
+        default=None,
+        metavar="PERCENT",
+        help="amount of cars and buses relative to normal: 100 is normal, 0 is none, up to 1000",
+    )
+    ap.add_argument(
+        "--rush",
+        default=None,
+        metavar="KEY_POINT",
+        help="start with a key point under rush-hour pressure (Copou, Păcurari, Gara Iași, Piața Unirii, "
+        "Bd. Independenței, Palas, Podu Roș, Tudor Vladimirescu)",
+    )
     ap.add_argument("--compare", action="store_true", help="headless fixed vs adaptive comparison table")
     ap.add_argument("--seconds", type=float, default=600.0, help="duration for --compare / --screenshot")
     ap.add_argument("--seeds", type=int, default=4, help="number of seeds for --compare")
@@ -185,7 +227,13 @@ def main() -> None:
         compare(args.seconds, args.seeds, args.map, demand=args.demand, incident_at=args.incident_at)
         return
     cfg = Config(seed=args.seed) if args.demand is None else Config(seed=args.seed, gate_demand=args.demand)
+    if args.traffic is not None and not 0 <= args.traffic <= 1000:
+        ap.error("--traffic must be between 0 and 1000")
     sim = Simulation(cfg, adaptive=not args.fixed, incident_at=args.incident_at, map_name=args.map)
+    try:
+        apply_start_options(sim, args.traffic, args.rush)
+    except ValueError as err:
+        ap.error(str(err))
     run_window(sim, args.screenshot, args.seconds)
 
 

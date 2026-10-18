@@ -55,6 +55,9 @@ class TrafficModel:
         self.buses: list[Vehicle] = []
         self.incidents: dict[int, tuple[Vehicle, float]] = {}  # segment -> (blocker, expiry)
         self.backlog = {g: 0 for g in net.gates}  # cars waiting outside a gate
+        self.demand_scale = 1.0  # runtime traffic amount: 1.0 is normal (100%), 0 spawns nothing
+        self.rush_node: int | None = None  # key point under rush-hour pressure
+        self.rush_backlog = {g: 0 for g in net.gates}
         self.next_release = [0.0] * len(net.segments)
         self.exited = 0
         self.dropped = 0
@@ -98,13 +101,17 @@ class TrafficModel:
         return car
 
     def _seed_cars(self) -> None:
+        self.scatter_cars(self.cfg.initial_cars)
+
+    def scatter_cars(self, n: int, via: int | None = None) -> int:
+        """Place up to `n` cars at random free spots along gate-to-gate trips (through node `via` if given)."""
         if not self.net.gates:
-            return
+            return 0
         placed = 0
-        for _ in range(self.cfg.initial_cars * 6):
-            if placed >= self.cfg.initial_cars:
+        for _ in range(n * 6):
+            if placed >= n:
                 break
-            route = self.net.random_trip(self.rng)
+            route = self.net.random_trip(self.rng) if via is None else self.trip_via(via)
             leg = self.rng.randrange(len(route))
             seg = self.net.segments[route[leg]]
             pos = self.rng.uniform(5.0, max(6.0, seg.stop_pos - 4.0))
@@ -112,6 +119,17 @@ class TrafficModel:
                 car = self._make_car(route, leg, pos, 0.6 * seg.speed_limit)
                 self._insert(self.lanes[seg.id], car)
                 placed += 1
+        return placed
+
+    def trip_via(self, node: int) -> list[int]:
+        """A gate-to-gate path that goes through `node` (a rush-hour commute), without a U-turn there."""
+        net = self.net
+        for _ in range(12):
+            a, b = self.rng.sample(net.gates, 2)
+            into, out = net.path_between(a, node), net.path_between(node, b)
+            if into and out and net.segments[out[0]].to_node != net.segments[into[-1]].from_node:
+                return into + out
+        return net.random_trip(self.rng)
 
     def add_bus(self, bus_id: str, line: str, route: list[int], leg: int, pos: float) -> Vehicle:
         """Place a bus on its route, sliding it back if the spot is taken."""
@@ -291,7 +309,7 @@ class TrafficModel:
 
     def _spawn(self, dt: float) -> None:
         cfg = self.cfg
-        p = 1.0 - math.exp(-cfg.gate_demand * dt)
+        p = 1.0 - math.exp(-cfg.gate_demand * self.demand_scale * dt)
         for gate in self.net.gates:
             if self.rng.random() < p:
                 if self.backlog[gate] < cfg.spawn_backlog_max:
@@ -300,19 +318,106 @@ class TrafficModel:
                     self.dropped += 1
             if self.backlog[gate]:
                 self._try_spawn(gate)
+        if (
+            self.rush_node is not None and cfg.rush_extra > 0
+        ):  # the rush-hour stream: extra commuters through the key point
+            p = 1.0 - math.exp(-cfg.gate_demand * cfg.rush_extra * self.demand_scale * dt)
+            for gate in self.net.gates:
+                if self.rng.random() < p:
+                    if self.rush_backlog[gate] < cfg.spawn_backlog_max:
+                        self.rush_backlog[gate] += 1
+                    else:
+                        self.dropped += 1
+                if self.rush_backlog[gate]:
+                    self._try_spawn(gate, self.rush_backlog, self.rush_node)
 
-    def _try_spawn(self, gate: int) -> None:
-        for _ in range(4):  # pick a destination that is reachable
-            dest = self.rng.choice([g for g in self.net.gates if g != gate])
-            path = self.net.path_between(gate, dest)
-            if path:
-                break
+    def _try_spawn(self, gate: int, backlog: dict[int, int] | None = None, via: int | None = None) -> None:
+        backlog = self.backlog if backlog is None else backlog
+        if via is None:
+            for _ in range(4):  # pick a destination that is reachable
+                dest = self.rng.choice([g for g in self.net.gates if g != gate])
+                path = self.net.path_between(gate, dest)
+                if path:
+                    break
+            else:
+                return
         else:
-            return
+            path = self._path_via(gate, via)
+            if not path:
+                return
         first = path[0]
         lane = self.lanes[first]
         if self.in_box.get(first):  # through traffic is already crossing the gate junction into this edge
             return
         if not lane or lane[-1].pos - lane[-1].length >= self.cfg.car_length + self.cfg.min_gap + 2.0:
-            self.backlog[gate] -= 1
+            backlog[gate] -= 1
             self.lanes[first].append(self._make_car(path, 0, 0.0, 0.7 * self.net.segments[first].speed_limit))
+
+    def _path_via(self, gate: int, via: int) -> list[int] | None:
+        net = self.net
+        into = net.path_between(gate, via)
+        if not into:
+            return None
+        for _ in range(6):
+            out = net.path_between(via, self.rng.choice([g for g in net.gates if g != gate]))
+            if out and net.segments[out[0]].to_node != net.segments[into[-1]].from_node:  # no U-turn at the key point
+                return into + out
+        return None
+
+    # -- runtime traffic controls ---------------------------------------------
+    def remove_vehicle(self, v: Vehicle) -> None:
+        """Take a vehicle off the map (used when the traffic amount is lowered)."""
+        lane = self.lanes[v.seg]
+        if v in lane:
+            lane.remove(v)
+        if v.next_seg is not None:
+            self.in_box.get(v.next_seg, {}).pop(v.id, None)
+        if v in self.buses:
+            self.buses.remove(v)
+
+    def try_place_bus(self, bus_id: str, line: str, route: list[int], leg: int, pos: float) -> Vehicle | None:
+        """Add a bus at a spot that is free right now; None if the spot is taken."""
+        seg = self.net.segments[route[leg]]
+        pos = min(pos, max(0.0, seg.stop_pos - 6.0))
+        if not self._free_at(seg.id, pos, self.cfg.bus_length):
+            return None
+        bus = Vehicle(
+            bus_id, "bus", seg.id, pos, 0.5 * seg.speed_limit, self.cfg.bus_length, 1.0,
+            route=route, cyclic=True, leg=leg, line=line,
+        )  # fmt: skip
+        bus.next_seg = self._next_on_route(bus)
+        self._insert(self.lanes[seg.id], bus)
+        self.buses.append(bus)
+        return bus
+
+    def set_car_percent(self, new: float, old: float) -> None:
+        """Change the car amount from `old` to `new` percent of normal: spawning scales, and cars on the
+        map are thinned out or topped up straight away so the change is visible at once."""
+        cfg = self.cfg
+        self.demand_scale = new / 100.0
+        cars = [v for v in self.iter_vehicles() if v.kind == "car"]
+        if new <= 0:
+            for v in cars:
+                self.remove_vehicle(v)
+            for g in self.backlog:
+                self.backlog[g] = self.rush_backlog[g] = 0
+        elif old <= 0:
+            self.scatter_cars(round(cfg.initial_cars * new / 100.0))
+        elif new < old:
+            keep = new / old
+            for v in cars:
+                if self.rng.random() > keep:
+                    self.remove_vehicle(v)
+            for g in self.backlog:
+                self.backlog[g] = int(self.backlog[g] * keep)
+                self.rush_backlog[g] = int(self.rush_backlog[g] * keep)
+        elif new > old:
+            self.scatter_cars(round(len(cars) * (new / old - 1.0)))
+
+    def set_rush_node(self, node: int | None) -> None:
+        """Put a junction under rush-hour pressure (or lift it): an extra car stream is routed through it."""
+        self.rush_node = node
+        for g in self.rush_backlog:
+            self.rush_backlog[g] = 0
+        if node is not None:
+            self.scatter_cars(round(self.cfg.rush_seed * self.demand_scale), via=node)

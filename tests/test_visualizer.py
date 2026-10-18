@@ -114,3 +114,59 @@ def test_screenshot_mode_writes_a_png(tmp_path):
     out = tmp_path / "frame.png"
     run_window(Simulation(Config(), map_name="grid"), str(out), 20)
     assert out.stat().st_size > 10_000
+
+
+def test_interactive_loop_traffic_and_rush_hour_shortcuts(screen):
+    sim = Simulation(Config(), map_name="iasi")
+    keys = [pygame.K_RIGHTBRACKET, pygame.K_RIGHTBRACKET, pygame.K_LEFTBRACKET, pygame.K_k, pygame.K_k]
+    for k in keys:
+        pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=k, mod=0))
+    pygame.event.post(pygame.event.Event(pygame.QUIT))
+    run_window(sim, None, 0)
+    assert sim.traffic_percent == 150  # 100 -> 150 -> 200 -> 150
+    assert sim.rush_point == sim.key_points[1]  # K twice: the first key point, then the second
+
+
+def test_interactive_loop_shift_k_goes_back_and_backslash_resets_to_normal(screen):
+    sim = Simulation(Config(), map_name="iasi")
+    sim.set_traffic_percent(500)
+    for k, mod in ((pygame.K_k, pygame.KMOD_SHIFT), (pygame.K_BACKSLASH, 0)):
+        pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=k, mod=mod))
+    pygame.event.post(pygame.event.Event(pygame.QUIT))
+    run_window(sim, None, 0)
+    assert sim.traffic_percent == 100 and sim.rush_point == sim.key_points[-1]
+
+
+def test_clicking_a_key_point_toggles_rush_hour_but_dragging_does_not(screen):
+    sim = Simulation(Config(), map_name="iasi")
+    city, _ = make_views(sim)
+    name, lat, lon = sim.net.landmarks_ll[3]
+    sx, sy = (int(v) for v in city.camera.latlon_to_screen(lat, lon))
+
+    def click(*, drag=0):
+        pygame.init()  # run_window shuts pygame down when it returns
+        pygame.display.set_mode(WINDOW)
+        pygame.event.post(pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=(sx, sy)))
+        pygame.event.post(pygame.event.Event(pygame.MOUSEBUTTONUP, button=1, pos=(sx + drag, sy)))
+        pygame.event.post(pygame.event.Event(pygame.QUIT))
+        run_window(sim, None, 0)
+
+    click()
+    assert sim.rush_point == name  # a click picks it
+    click()
+    assert sim.rush_point is None  # clicking it again lifts the pressure
+    click(drag=40)
+    assert sim.rush_point is None  # a drag is not a click
+
+
+@pytest.mark.parametrize("percent", [0, 1000])
+def test_the_dashboard_draws_at_the_extremes_with_rush_hour_on(screen, percent):
+    sim = Simulation(Config(), map_name="iasi")
+    sim.set_traffic_percent(percent)
+    sim.set_rush_point("Podu Roș")
+    sim.run(20)
+    city, hud = make_views(sim)
+    ui = UiState(rows=snapshot_buses(sim))
+    city.draw(screen, sim, ui)
+    hud.draw(screen, sim, ui)
+    assert (percent == 0) == (not ui.rows)

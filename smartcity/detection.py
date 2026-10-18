@@ -87,6 +87,10 @@ class DetectionLoops:
     def observe(self, tel: BusTelemetry) -> None:
         self.latest[tel.bus_id] = tel
 
+    def forget(self, bus_id: str) -> None:
+        """A bus left the map: stop counting its last known position."""
+        self.latest.pop(bus_id, None)
+
     def refresh(self) -> None:
         """Recompute every window from the latest position of each bus.
 

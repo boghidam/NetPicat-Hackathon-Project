@@ -192,7 +192,7 @@ class Hud:
         y = self._draw_predictions(screen, sim, x, y + 8, w)
         y = self._draw_loops(screen, sim, x, y + 8, w)
         y = self._draw_overrides(screen, sim, x, y + 8, w)
-        self._draw_controls(screen, x, self.rect.bottom - 48, w)
+        self._draw_controls(screen, x, self.rect.bottom - 66, w)
 
     # -- Primitives & Micro-Components -----------------------------------------
     def _card(
@@ -501,7 +501,7 @@ class Hud:
 
     # -- Automated Cycle Adjustments (Override Log) ----------------------------
     def _draw_overrides(self, screen: pygame.Surface, sim: Simulation, x: int, y: int, w: int) -> int:
-        h = max(168, self.rect.bottom - 58 - y)
+        h = max(168, self.rect.bottom - 76 - y)
         inner_y = self._card(
             screen,
             x,
@@ -575,3 +575,11 @@ class Hud:
         px = key_pill("F", "Fit Map", px, py)
         px = key_pill("+ / -", "Scale", px, py)
         key_pill("Q", "Quit", px, py)
+
+        # Row 3: traffic amount and rush hour
+        py = y + 36
+        px = x
+        px = key_pill("[ ]", "Traffic less / more", px, py)
+        px = key_pill("\\", "100%", px, py)
+        px = key_pill("K", "Rush-hour key point", px, py)
+        key_pill("CLICK", "Pick key point", px, py)

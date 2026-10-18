@@ -34,6 +34,10 @@ class Config:
     initial_cars: int = 150
     spawn_backlog_max: int = 40  # cars waiting outside a blocked gate before new ones are dropped
 
+    # --- rush hour at a key point (runtime option) ----------------------------
+    rush_extra: float = 2.0  # extra car demand at every gate, as a multiple of normal, routed through the key point
+    rush_seed: int = 120  # cars placed on routes through the key point the moment rush hour starts (at 100% traffic)
+
     # --- buses -----------------------------------------------------------
     bus_headway_m: float = 3500.0  # one bus per this much route length (at least 2 per line)
     max_buses_per_line: int = 5

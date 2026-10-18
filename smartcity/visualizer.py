@@ -48,6 +48,7 @@ CAR = (147, 197, 253)  # Sky blue metallic
 CAR_OUTLINE = (15, 23, 42)  # Dark slate outline
 ROAD_WIDTH_M = {"primary": 12.0, "secondary": 10.0, "tertiary": 8.0}
 RING_KINDS = {"LOCAL_EXTEND", "PREDICTIVE_EXTEND", "THROTTLE"}
+RUSH = (255, 122, 40)  # rush-hour orange: the key point under pressure
 
 
 def lerp(a: tuple[int, int, int], b: tuple[int, int, int], k: float) -> tuple[int, int, int]:
@@ -117,6 +118,7 @@ class CityView:
         self._layer_state: tuple | None = None  # (cx, cy, scale, show_lines)
         self._layer_time = 0.0
         self._chips: dict[str, pygame.Surface] = {}
+        self._landmarks = list(sim.net.landmarks_ll)
 
     # -- Input helpers ---------------------------------------------------------
     def zoom(self, pos: tuple[int, int], factor: float) -> None:
@@ -132,6 +134,22 @@ class CityView:
     def fit(self) -> None:
         self.camera.fit()
 
+    def landmark_at(self, pos: tuple[int, int]) -> str | None:
+        """The key point whose pin or label is under the mouse, if any (click one to put it under pressure)."""
+        best: tuple[float, str] | None = None
+        for name, lat, lon in self._landmarks:
+            sx, sy = self.camera.latlon_to_screen(lat, lon)
+            tw, th = self.label.size(name.upper())
+            w_cap, h_cap = tw + 22, th + 6  # the same capsule that is drawn on the map
+            flush_right = int(sx) - 8 + w_cap > self.rect.width - 8
+            bx = int(sx) - w_cap + 8 if flush_right else int(sx) - 8
+            capsule = pygame.Rect(bx, int(sy - h_cap // 2), w_cap, h_cap)
+            dist = math.hypot(pos[0] - sx, pos[1] - sy)
+            if capsule.collidepoint(pos) or dist <= 12:
+                if best is None or dist < best[0]:
+                    best = (dist, name)
+        return best[1] if best else None
+
     # -- Frame rendering -------------------------------------------------------
     def draw(self, screen: pygame.Surface, sim: Simulation, ui: UiState) -> None:
         screen.set_clip(self.rect)
@@ -141,6 +159,7 @@ class CityView:
         self._forecasts(screen, sim)
         self._rings(screen, sim)
         self._vehicles(screen, sim)
+        self._rush_marker(screen, sim)
         self._map_overlays(screen, sim, ui)
         self._legend(screen, sim, ui)
         screen.set_clip(None)
@@ -416,6 +435,23 @@ class CityView:
             )
             screen.blit(self._chip(v.line or "?", line_color(sim, v.line or "")), (cx + 6, cy - 14))
 
+    # -- Rush-hour marker on the key point under pressure ------------------------
+    def _rush_marker(self, screen: pygame.Surface, sim: Simulation) -> None:
+        node_id = sim.model.rush_node
+        if sim.rush_point is None or node_id is None:
+            return
+        node = sim.net.nodes[node_id]
+        cx, cy = self.camera.to_screen(node.x, node.y)
+        phase = (sim.t * 0.8) % 1.0
+        for k in range(3):  # rings spreading outward: pressure building up around the junction
+            f = (phase + k / 3) % 1.0
+            pygame.draw.circle(screen, lerp(RUSH, BG, f), (cx, cy), int(14 + 46 * f), 2)
+        pygame.draw.circle(screen, RUSH, (cx, cy), 9, 3)
+        tag = self.legend_bold.render(f"RUSH HOUR · {sim.rush_point.upper()}", True, (20, 14, 8))
+        box = pygame.Rect(int(cx) + 16, int(cy) - 30, tag.get_width() + 12, tag.get_height() + 6)
+        pygame.draw.rect(screen, RUSH, box, border_radius=4)
+        screen.blit(tag, (box.x + 6, box.y + 3))
+
     # -- Top-Left Map Status Overlay -------------------------------------------
     def _map_overlays(self, screen: pygame.Surface, sim: Simulation, ui: UiState) -> None:
         x, y = self.rect.x + 14, self.rect.y + 12
@@ -438,6 +474,21 @@ class CityView:
         corridor = "SYNTHETIC TEST GRID" if "synthetic" in sim.net.source else "IAȘI ARTERIAL CORRIDOR"
         sub = heat_name if heat_name else f"{corridor} · {sum(n.signalised for n in sim.net.nodes)} SIGNALS"
         screen.blit(self.sub_banner.render(sub, True, (138, 150, 170)), (x + 24, y + 24))
+
+        # Traffic amount and rush-hour key point
+        pct = sim.traffic_percent
+        pct_col = CYAN if pct == 100 else (LIME if pct < 100 else (AMBER if pct <= 300 else RUSH))
+        line2 = f"TRAFFIC {pct:g}%  ·  {sim.model.n_cars} CARS  ·  {len(sim.fleet.buses)} BUSES"
+        rush = f"RUSH HOUR: {sim.rush_point.upper()}" if sim.rush_point else "RUSH HOUR: OFF (K OR CLICK A KEY POINT)"
+        w2 = max(card_w, self.legend_bold.size(line2)[0] + 28, self.legend_bold.size(rush)[0] + 28)
+        capsule2 = pygame.Surface((w2, 40), pygame.SRCALPHA)
+        pygame.draw.rect(capsule2, (17, 22, 32, 220), (0, 0, w2, 40), border_radius=6)
+        pygame.draw.rect(capsule2, (36, 46, 64, 240), (0, 0, w2, 40), width=1, border_radius=6)
+        screen.blit(capsule2, (x, y + card_h + 6))
+        screen.blit(self.legend_bold.render(line2, True, pct_col), (x + 12, y + card_h + 13))
+        screen.blit(
+            self.legend_bold.render(rush, True, RUSH if sim.rush_point else (110, 122, 142)), (x + 12, y + card_h + 28)
+        )
 
     # -- Bottom-Left Interactive Legend Card -----------------------------------
     def _legend(self, screen: pygame.Surface, sim: Simulation, ui: UiState) -> None:

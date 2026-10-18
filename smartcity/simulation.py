@@ -19,6 +19,9 @@ from .traffic_model import TrafficModel
 
 
 class Simulation:
+    # the traffic amount moves along this ladder with the [ and ] keys: 100% is normal
+    TRAFFIC_STEPS = (0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 150, 200, 300, 400, 500, 600, 700, 800, 900, 1000)
+
     def __init__(
         self,
         cfg: Config | None = None,
@@ -53,10 +56,14 @@ class Simulation:
         self.api.subscribe(self.predictor.on_telemetry)
         self.api.subscribe(self.coord.observe)
         self.api.subscribe(self.progress.on_telemetry)
+        for consumer in (self.loops, self.progress, self.predictor):  # a bus taken off the map must be forgotten
+            self.fleet.on_remove.append(consumer.forget)
 
         self.incident_at = incident_at
         self.incident_segment = self._pick_incident_segment()
         self.incident_started = False
+        self.traffic_percent = 100.0  # cars and buses relative to normal, 0 to 1000
+        self.rush_point: str | None = None  # name of the key point under rush-hour pressure
         self._since_refresh = cfg.decision_period  # force an initial refresh
         # metrics
         self.slow_ema = 0.0  # recent mean fraction of time buses lose to delay
@@ -99,6 +106,66 @@ class Simulation:
             f"vehicle stalled on {where} (n{seg.from_node}->n{seg.to_node}) for {self.cfg.incident_duration:.0f}s",
             node=seg.to_node,
         )
+
+    # -- runtime traffic controls ---------------------------------------------
+    def set_traffic_percent(self, percent: float) -> None:
+        """Set the amount of cars and buses: 100 is normal traffic, 0 is none, up to 1000 (ten times as much)."""
+        percent = float(max(0.0, min(1000.0, percent)))
+        old = self.traffic_percent
+        if percent == old:
+            return
+        self.traffic_percent = percent
+        self.model.set_car_percent(percent, old)
+        self.fleet.set_percent(percent)
+        self.events.add(
+            self.t,
+            "INFO",
+            f"traffic {percent:g}% of normal: {self.model.n_cars} cars, {len(self.fleet.buses)} buses",
+        )
+
+    def step_traffic(self, direction: int) -> None:
+        """Move one step up (+1) or down (-1) the traffic ladder."""
+        steps = self.TRAFFIC_STEPS
+        cur = self.traffic_percent
+        if direction > 0:
+            self.set_traffic_percent(next((s for s in steps if s > cur), steps[-1]))
+        else:
+            self.set_traffic_percent(next((s for s in reversed(steps) if s < cur), steps[0]))
+
+    @property
+    def key_points(self) -> list[str]:
+        """The named key points of the map that can be put under rush-hour pressure."""
+        return [name for name, _lat, _lon in self.net.landmarks_ll]
+
+    def set_rush_point(self, name: str | None) -> None:
+        """Put a key point under rush-hour pressure (extra commuters routed through it), or lift it with None."""
+        if name is None:
+            self.model.set_rush_node(None)
+            if self.rush_point is not None:
+                self.events.add(self.t, "INFO", f"rush hour over at {self.rush_point}")
+            self.rush_point = None
+            return
+        match = next((n for n in self.key_points if n.casefold() == name.casefold()), None)
+        if match is None:
+            raise ValueError(f"unknown key point {name!r}; choose from {', '.join(self.key_points)}")
+        node = self._junction_near(match)
+        self.rush_point = match
+        self.model.set_rush_node(node)
+        self.events.add(self.t, "INFO", f"RUSH HOUR at {match}: extra traffic routed through n{node}", node=node)
+
+    def cycle_rush_point(self, direction: int = 1) -> None:
+        """Step through the key points: none, then each in turn (backwards with direction=-1)."""
+        options: list[str | None] = [None, *self.key_points]
+        i = options.index(self.rush_point) if self.rush_point in options else 0
+        self.set_rush_point(options[(i + direction) % len(options)])
+
+    def _junction_near(self, key_point: str) -> int:
+        """The signalised junction closest to a named key point (a real intersection, never a gate)."""
+        net = self.net
+        _, lat, lon = next(k for k in net.landmarks_ll if k[0] == key_point)
+        x, y = net.proj.to_xy(lat, lon)
+        junctions = [n for n in net.nodes if n.signalised] or [n for n in net.nodes if not n.gate]
+        return min(junctions, key=lambda n: math.hypot(n.x - x, n.y - y)).id
 
     # -- stepping ------------------------------------------------------------
     def step(self) -> None:

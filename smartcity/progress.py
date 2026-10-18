@@ -58,6 +58,9 @@ class RouteProgress:
             track.times.append(tel.t)
             track.odos.append(track.odo)
 
+    def forget(self, bus_id: str) -> None:
+        self._tracks.pop(bus_id, None)
+
     def odometer(self, bus_id: str) -> float | None:
         track = self._tracks.get(bus_id)
         return track.odo if track else None
