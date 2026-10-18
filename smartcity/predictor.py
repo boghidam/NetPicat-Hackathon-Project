@@ -122,10 +122,8 @@ class PostIntersectionPredictor:
 
         if track.pending is not None:
             self._resolve(track, ratio, tel)
-        # a hop-2 forecast from this bus for the segment it just entered is now realised
-        for fid in [
-            f.id for f in self._active.values() if f.source_bus == tel.bus_id and f.target_segment == tel.segment_id
-        ]:
+        # previous multi-hop forecasts from this bus are superseded by the fresh window issued below
+        for fid in [f.id for f in self._active.values() if f.source_bus == tel.bus_id]:
             del self._active[fid]
 
         track.history.append(_Leg(ratio, gain, duration))

@@ -129,6 +129,7 @@ class NetworkCoordinator:
             self.dload[sid], self._worst[sid] = worst, worst_id
             if not self.adaptive or seg.to_node not in self.controllers:
                 self.throttle[sid] = 1.0
+                self._throttled.discard(sid)
                 continue
             # Backpressure: meter only when this release would push traffic onto a link
             # that is clearly worse off than the one it leaves (shifting the bottleneck).
@@ -256,7 +257,7 @@ class IntersectionController:
 
     # -- simulation step ---------------------------------------------------
     def step(self, now: float, dt: float) -> None:
-        self.elapsed += dt
+        self.elapsed = round(self.elapsed + dt, 6)
         if self.phase == "YELLOW":
             if self.elapsed >= self.cfg.yellow:
                 self.phase, self.elapsed = "ALLRED", 0.0

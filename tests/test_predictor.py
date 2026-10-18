@@ -90,10 +90,10 @@ def test_a_bus_without_a_known_line_only_gets_the_next_edge_forecast():
 
 def test_forecast_window_moves_ahead_as_the_bus_clears_each_junction():
     cfg, net, route, pred = make()
-    drive(pred, net, route, "B00", [(0, 0.5), (1, 0.5)])
-    before = [f.target_segment for f in hops(pred, "B00")]
-    drive(pred, net, route, "B00", [(2, 0.5)], t0=200.0)
-    after = [f.target_segment for f in hops(pred, "B00", now=200.0)]
+    t = drive(pred, net, route, "B00", [(0, 0.5), (1, 0.5)])
+    before = [f.target_segment for f in hops(pred, "B00", now=t)]
+    t = drive(pred, net, route, "B00", [(2, 0.5)], t0=t)
+    after = [f.target_segment for f in hops(pred, "B00", now=t)]
     assert before[0] == route.edges[1] and after == [route.edges[2], route.edges[3], route.edges[4]]
 
 

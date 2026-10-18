@@ -109,3 +109,13 @@ def test_buses_near_ignores_buses_of_unknown_lines_on_earlier_edges(loops_and_ne
     loops.observe(rec)
     assert loops.buses_near([road(net, 5, 6)], 300.0) == {}
     assert road(net, 4, 5) in {a for _, a in loops.buses_near([road(net, 4, 5)], 300.0).values()}
+
+
+def test_upstream_feeds_have_unique_targets_sorted_by_distance(iasi_net):
+    loops = DetectionLoops(iasi_net, Config())
+    for sid, feed in enumerate(loops.feeds):
+        targets = [t for t, _ in feed]
+        bases = [b for _, b in feed]
+        assert len(targets) == len(set(targets))
+        assert feed[0] == (sid, 0.0)
+        assert bases == sorted(bases)

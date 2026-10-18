@@ -109,12 +109,12 @@ class Simulation:
             c.step(self.t, dt)
         self.model.step(self.t, dt, self.coord.signal_state, self.coord.release_factor)
         self.fleet.emit(self.t)
-        self._since_refresh += dt
+        self._since_refresh = round(self._since_refresh + dt, 6)
         if self._since_refresh >= cfg.decision_period:
             self._since_refresh = 0.0
             self.coord.refresh(self.t)
             self.peak_density = max(self.peak_density, max(self.model.density(s.id) for s in self.net.segments))
-        self.t += dt
+        self.t = round(self.t + dt, 6)
         buses = self.fleet.buses
         if buses:
             segs = self.net.segments

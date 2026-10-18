@@ -48,13 +48,13 @@ class RouteProgress:
         along = max(0.0, min(seg.length, seg.stop_pos - tel.dist_to_next_node))
         track = self._tracks.get(tel.bus_id)
         laps = track.laps if track else 0
-        if track and tel.leg < track.last_leg - len(starts) // 2:  # wrapped around the loop
+        if track and tel.leg <= track.last_leg - max(1, len(starts) // 2):  # wrapped around the loop
             laps += 1
         odo = laps * total + starts[tel.leg] + along
         if track is None:
             track = self._tracks[tel.bus_id] = _Track(tel.leg, laps, odo)
         track.last_leg, track.laps, track.odo = tel.leg, laps, max(odo, track.odo)
-        if not track.times or tel.t - track.times[-1] >= self.SAMPLE_EVERY:
+        if not track.times or tel.t - track.times[-1] >= self.SAMPLE_EVERY - 1e-9:
             track.times.append(tel.t)
             track.odos.append(track.odo)
 
@@ -68,7 +68,7 @@ class RouteProgress:
         None when its history does not reach back that far (it cannot be judged yet).
         """
         track = self._tracks.get(bus_id)
-        if track is None or not track.times or track.times[0] > now - span:
+        if track is None or not track.times or track.times[0] > now - span + 1e-6:
             return None
-        i = bisect_right(track.times, now - span) - 1
+        i = max(0, bisect_right(track.times, now - span + 1e-6) - 1)
         return max(0.0, track.odo - track.odos[i])

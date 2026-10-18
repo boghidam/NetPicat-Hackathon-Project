@@ -10,40 +10,40 @@ from .events import OVERRIDE_KINDS
 from .simulation import Simulation
 
 # --- Refined Mission-Control Dark Theme ---------------------------------------
-BG = (11, 13, 19)             # Deep slate canvas background
-PANEL = (17, 21, 30)          # Operations panel background
-PANEL_BORDER = (34, 42, 58)   # Subtle panel boundary
-CARD_BG = (22, 27, 38)        # Structured card container
-CARD_BORDER = (36, 45, 62)    # Clean card outline
-CARD_HEADER_BG = (27, 34, 48) # Card header surface
-ROW_ALT = (19, 24, 34)        # Alternating table row background
+BG = (11, 13, 19)  # Deep slate canvas background
+PANEL = (17, 21, 30)  # Operations panel background
+PANEL_BORDER = (34, 42, 58)  # Subtle panel boundary
+CARD_BG = (22, 27, 38)  # Structured card container
+CARD_BORDER = (36, 45, 62)  # Clean card outline
+CARD_HEADER_BG = (27, 34, 48)  # Card header surface
+ROW_ALT = (19, 24, 34)  # Alternating table row background
 
 # Typography colors
-TEXT = (240, 244, 250)        # Crisp primary off-white
+TEXT = (240, 244, 250)  # Crisp primary off-white
 TEXT_MUTED = (142, 154, 175)  # Secondary descriptive labels
-TEXT_DIM = (96, 108, 128)     # Muted units & metadata
-DIM = TEXT_MUTED              # Backward compatibility alias
-RULE = (34, 42, 58)           # Hairline card divider
+TEXT_DIM = (96, 108, 128)  # Muted units & metadata
+DIM = TEXT_MUTED  # Backward compatibility alias
+RULE = (34, 42, 58)  # Hairline card divider
 
 # Semantic status accents
-LIME = (34, 197, 94)          # Emerald green (normal / adaptive / free-flow)
-AMBER = (245, 158, 11)        # Warm amber (warning / slowing / baseline)
-RED = (239, 68, 68)           # Crimson (congestion / incident / stalled)
-CYAN = (14, 165, 233)         # Technical blue (telemetry / forecasts)
-MAGENTA = (236, 72, 153)      # Rose (metering / throttling)
-ORANGE = (249, 115, 22)       # Amber orange (extensions)
-VIOLET = (139, 92, 246)       # Violet
+LIME = (34, 197, 94)  # Emerald green (normal / adaptive / free-flow)
+AMBER = (245, 158, 11)  # Warm amber (warning / slowing / baseline)
+RED = (239, 68, 68)  # Crimson (congestion / incident / stalled)
+CYAN = (14, 165, 233)  # Technical blue (telemetry / forecasts)
+MAGENTA = (236, 72, 153)  # Rose (metering / throttling)
+ORANGE = (249, 115, 22)  # Amber orange (extensions)
+VIOLET = (139, 92, 246)  # Violet
 
 # CTP Transit Authority Line Palette (Clean, distinct transit colors)
 LINE_COLORS = [
-    (14, 165, 233),   # Line 19: Sky Blue
-    (168, 85, 247),   # Line 28: Purple
-    (249, 115, 22),   # Line 36: Orange
-    (34, 197, 94),    # Line 41: Emerald
-    (236, 72, 153),   # Line 20: Rose
-    (234, 179, 8),    # Line 42: Gold
-    (99, 102, 241),   # Line 43: Indigo
-    (20, 184, 166),   # Line 47: Teal
+    (14, 165, 233),  # Line 19: Sky Blue
+    (168, 85, 247),  # Line 28: Purple
+    (249, 115, 22),  # Line 36: Orange
+    (34, 197, 94),  # Line 41: Emerald
+    (236, 72, 153),  # Line 20: Rose
+    (234, 179, 8),  # Line 42: Gold
+    (99, 102, 241),  # Line 43: Indigo
+    (20, 184, 166),  # Line 47: Teal
 ]
 
 KIND_COLOR = {
@@ -113,18 +113,33 @@ def snapshot_buses(sim: Simulation, n: int = 10) -> list[BusRow]:
         extra[f.source_bus] = extra.get(f.source_bus, 0.0) + f.predicted_delay
     latest = sim.loops.latest
     rows = []
-    for bus_id, tel in latest.items():
-        rows.append(
-            BusRow(
-                bus_id,
-                tel.line,
-                tel.speed * 3.6,
-                tel.speed / tel.free_speed,
-                tel.dist_to_next_node,
-                tel.delay,
-                extra.get(bus_id, 0.0),
+    if latest:
+        for bus_id, tel in latest.items():
+            rows.append(
+                BusRow(
+                    bus_id,
+                    tel.line,
+                    tel.speed * 3.6,
+                    tel.speed / tel.free_speed,
+                    tel.dist_to_next_node,
+                    tel.delay,
+                    extra.get(bus_id, 0.0),
+                )
             )
-        )
+    else:
+        for b in sim.fleet.buses:
+            seg = sim.net.segments[b.seg]
+            rows.append(
+                BusRow(
+                    b.id,
+                    b.line or "",
+                    b.v * 3.6,
+                    b.v / seg.speed_limit,
+                    min(seg.stop_pos, max(0.0, seg.stop_pos - b.pos)),
+                    b.delay,
+                    0.0,
+                )
+            )
     rows.sort(key=lambda r: (-r.predicted, -r.delay))
     return rows[:n]
 
@@ -132,8 +147,8 @@ def snapshot_buses(sim: Simulation, n: int = 10) -> list[BusRow]:
 class Hud:
     def __init__(self, rect: pygame.Rect):
         self.rect = rect
-        sans = "segoeui,inter,helveticaneue,arial,sans-serif"
-        mono = "consolas,jetbrainsmono,menlo,dejavusansmono,monospace"
+        sans = "helveticaneue,segoeui,inter,arial,sans-serif"
+        mono = "menlo,jetbrainsmono,consolas,dejavusansmono,monospace"
 
         # Typographic scale
         self.font_brand = pygame.font.SysFont(sans, 13, bold=True)
@@ -258,7 +273,10 @@ class Hud:
 
         speed_lbl = "PAUSED" if ui.paused else f"{ui.speed:g}× SPEED"
         time_str = f"t={sim.t:5.1f}s  {speed_lbl}"
-        screen.blit(self.font_mono_small.render(time_str, True, TEXT_MUTED), (x + w - self.font_mono_small.size(time_str)[0], y + 17))
+        screen.blit(
+            self.font_mono_small.render(time_str, True, TEXT_MUTED),
+            (x + w - self.font_mono_small.size(time_str)[0], y + 17),
+        )
 
         return y + 36
 
@@ -269,9 +287,24 @@ class Hud:
         card_h = 48
 
         kpis = [
-            ("BUS TIME LOSS", f"{m['bus_delay_ratio']:.1%}", f"Recent: {m['bus_delay_recent']:.1%}", AMBER if m['bus_delay_ratio'] > 0.35 else LIME),
-            ("TRAFFIC FLOW", f"{m['car_speed']:.0%}", f"{int(m['cars'])} active cars · {int(m['throughput'])} exited", CYAN),
-            ("TSP OVERRIDES", f"{int(m['overrides'])}", "Extend & Throttle cycles", ORANGE if sim.adaptive else TEXT_DIM),
+            (
+                "BUS TIME LOSS",
+                f"{m['bus_delay_ratio']:.1%}",
+                f"Recent: {m['bus_delay_recent']:.1%}",
+                AMBER if m["bus_delay_ratio"] > 0.35 else LIME,
+            ),
+            (
+                "TRAFFIC FLOW",
+                f"{m['car_speed']:.0%}",
+                f"{int(m['cars'])} cars · {int(m['throughput'])} out · {int(m['queued_outside'])} queued",
+                CYAN,
+            ),
+            (
+                "TSP OVERRIDES",
+                f"{int(m['overrides'])}",
+                "Extend & Throttle cycles",
+                ORANGE if sim.adaptive else TEXT_DIM,
+            ),
         ]
 
         for i, (label, val, sub, col) in enumerate(kpis):
@@ -379,23 +412,31 @@ class Hud:
             w,
             h,
             title="AI Route Predictions (Feed-Forward)",
-            badge=f"{p.model_name} · MAE {p.mae_speed * 3.6:3.1f} KM/H · RESOLVED {p.resolved}",
+            badge=f"{p.model_name} · MAE {p.mae_speed * 3.6:3.1f} KM/H · ETA ±{p.mae_eta:3.1f}S · {p.resolved} DONE",
             badge_color=CYAN,
         )
 
-        upcoming = [f for f in p.active(sim.t) if f.hop == 1][:3]
+        upcoming = sorted(
+            (f for f in p.active(sim.t) if f.hop == 1),
+            key=lambda f: (-round(f.predicted_delay), f.eta),
+        )[:3]
         if not upcoming:
-            screen.blit(self.font_mono_small.render("● Waiting for transit vehicles to clear approach stop lines…", True, TEXT_DIM), (x + 12, inner_y + 12))
+            screen.blit(
+                self.font_mono_small.render(
+                    "● Waiting for transit vehicles to clear approach stop lines…", True, TEXT_DIM
+                ),
+                (x + 12, inner_y + 12),
+            )
         else:
             for idx, f in enumerate(upcoming):
                 fy = inner_y + idx * 16
                 seg = sim.net.segments[f.target_segment]
                 color = RED if f.predicted_delay > 20 else (AMBER if f.predicted_delay > 6 else LIME)
                 eta_s = f"{f.eta - sim.t:3.0f}s" if f.eta > sim.t else "at line"
-                name = (seg.name or seg.highway)[:18]
+                name = (seg.name or seg.highway)[:17]
 
                 # Ticket line: Bus -> Node Street | Delay | ETA | Conf
-                prefix = f"{f.source_bus} L{f.line:<2s} → n{seg.to_node:<2d} {name:<18s}"
+                prefix = f"{f.source_bus} L{f.line:<2s} → n{seg.to_node:<3d} {name:<17s}"
                 screen.blit(self.font_mono_small.render(prefix, True, TEXT), (x + 10, fy))
 
                 stats = f"+{f.predicted_delay:2.0f}s delay  ETA {eta_s:>6s}  conf {f.confidence:.2f}"
@@ -407,7 +448,10 @@ class Hud:
             ry = inner_y + 54
             pygame.draw.line(screen, RULE, (x + 8, ry - 3), (x + w - 8, ry - 3), 1)
             screen.blit(self.font_badge.render("RESOLVED:", True, TEXT_DIM), (x + 10, ry))
-            screen.blit(self.font_mono_small.render(self.fit(last, self.font_mono_small, w - 70), True, TEXT_MUTED), (x + 64, ry - 1))
+            screen.blit(
+                self.font_mono_small.render(self.fit(last, self.font_mono_small, w - 76), True, TEXT_MUTED),
+                (x + 70, ry - 1),
+            )
 
         return y + h
 
@@ -435,15 +479,18 @@ class Hud:
         )[:3]
 
         if not ranked:
-            screen.blit(self.font_mono_small.render("● No transit vehicles currently inside detector windows", True, TEXT_DIM), (x + 12, inner_y + 12))
+            screen.blit(
+                self.font_mono_small.render("● No transit vehicles currently inside detector windows", True, TEXT_DIM),
+                (x + 12, inner_y + 12),
+            )
         else:
             for idx, (dens, sid, r) in enumerate(ranked):
                 ly = inner_y + idx * 17
                 seg = sim.net.segments[sid]
                 color = RED if dens > 0.6 else (AMBER if dens > 0.3 else LIME)
-                name = (seg.name or seg.highway)[:20]
+                name = (seg.name or seg.highway)[:19]
 
-                txt = f"n{seg.to_node:<2d} {name:<20s}  buses [{r.count[0]}/{r.count[1]}/{r.count[2]}]"
+                txt = f"n{seg.to_node:<3d} {name:<19s}  buses [{r.count[0]}/{r.count[1]}/{r.count[2]}]"
                 screen.blit(self.font_mono_small.render(txt, True, TEXT), (x + 10, ly))
 
                 load_txt = f"{dens:.2f}"
@@ -454,7 +501,7 @@ class Hud:
 
     # -- Automated Cycle Adjustments (Override Log) ----------------------------
     def _draw_overrides(self, screen: pygame.Surface, sim: Simulation, x: int, y: int, w: int) -> int:
-        h = 168
+        h = max(168, self.rect.bottom - 58 - y)
         inner_y = self._card(
             screen,
             x,
@@ -466,9 +513,15 @@ class Hud:
             badge_color=ORANGE if sim.events.overrides else TEXT_DIM,
         )
 
-        events = sim.events.recent(7, LOG_KINDS)
+        max_rows = max(7, (h - 36) // 16)
+        events = sim.events.recent(max_rows, LOG_KINDS)
         if not events:
-            screen.blit(self.font_mono_small.render("● Standard fixed-time signal cycles running (no overrides required)", True, TEXT_DIM), (x + 12, inner_y + 16))
+            screen.blit(
+                self.font_mono_small.render(
+                    "● Standard fixed-time signal cycles running (no overrides required)", True, TEXT_DIM
+                ),
+                (x + 12, inner_y + 16),
+            )
         else:
             for idx, e in enumerate(reversed(events)):
                 ey = inner_y + idx * 16

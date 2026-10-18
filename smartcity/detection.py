@@ -59,24 +59,30 @@ class DetectionLoops:
         self.feeds: list[list[tuple[int, float]]] = [[] for _ in net.segments]
         for s in net.segments:
             self._index_upstream(s.id)
+        for feed in self.feeds:
+            feed.sort(key=lambda item: item[1])
         self.latest: dict[str, BusTelemetry] = {}
         self.readings: dict[int, LoopReading] = {}
 
     def _index_upstream(self, target: int) -> None:
         net = self.net
-        self.feeds[target].append((target, 0.0))
+        best: dict[int, float] = {target: 0.0}
         frontier = [(target, 0.0)]
         while frontier:
             e_id, base = frontier.pop()
+            if base > best.get(e_id, self.reach):
+                continue
             e = net.segments[e_id]
             for p_id in net.in_segs[e.from_node]:
                 p = net.segments[p_id]
                 if p.from_node == e.to_node or e_id not in {t for t, _ in net.turn_targets(p_id)}:
                     continue  # a U-turn, or a street that cannot turn into e
                 p_base = base + (p.length - p.stop_pos) + e.stop_pos
-                if p_base < self.reach:
-                    self.feeds[p_id].append((target, p_base))
+                if p_base < best.get(p_id, self.reach):
+                    best[p_id] = p_base
                     frontier.append((p_id, p_base))
+        for e_id, base in best.items():
+            self.feeds[e_id].append((target, base))
 
     def observe(self, tel: BusTelemetry) -> None:
         self.latest[tel.bus_id] = tel

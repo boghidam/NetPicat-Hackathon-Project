@@ -18,11 +18,18 @@ from .data import build_city
 from .simulation import Simulation
 
 
-def compare(seconds: float, seeds: int, map_name: str) -> None:
-    cfg = Config()
+def compare(
+    seconds: float,
+    seeds: int,
+    map_name: str,
+    demand: float | None = None,
+    incident_at: float | None = None,
+) -> None:
+    cfg = Config() if demand is None else Config(gate_demand=demand)
+    inc = 120.0 if incident_at is None else incident_at
     net = build_city(map_name, cfg)  # the network is shared; each run builds its own world
     print(
-        f"{map_name}: a vehicle stalls on the busiest bus corridor at t=120 s; {seeds} seeds x {seconds:.0f} s each.\n"
+        f"{map_name}: a vehicle stalls on the busiest bus corridor at t={inc:.0f} s; {seeds} seeds x {seconds:.0f} s each.\n"
     )
     print(
         f"{'mode':<10} {'bus time lost':>14} {'car speed':>10} {'jam edge-s':>11} {'cars exited':>12} {'adjustments':>12}"
@@ -30,7 +37,8 @@ def compare(seconds: float, seeds: int, map_name: str) -> None:
     for adaptive in (False, True):
         lost = speed = jam = thr = ovr = 0.0
         for seed in range(1, seeds + 1):
-            sim = Simulation(Config(seed=seed), adaptive=adaptive, incident_at=120.0, net=net)
+            run_cfg = Config(seed=seed) if demand is None else Config(seed=seed, gate_demand=demand)
+            sim = Simulation(run_cfg, adaptive=adaptive, incident_at=inc, net=net)
             for _ in range(int(seconds / 5)):
                 sim.run(5)
                 jam += 5 * sum(sim.model.density(s.id) > 0.5 for s in net.segments)
@@ -58,7 +66,7 @@ def run_window(sim: Simulation, screenshot: str | None, seconds: float) -> None:
     screen = pygame.display.set_mode(WINDOW)
     pygame.display.set_caption("Smart City Traffic Demo: Iași")
     city, hud = make_views(sim)
-    ui = UiState()
+    ui = UiState(rows=snapshot_buses(sim))
 
     def draw() -> None:
         screen.fill((11, 13, 19))
@@ -75,6 +83,16 @@ def run_window(sim: Simulation, screenshot: str | None, seconds: float) -> None:
         pygame.quit()
         return
 
+    speed_keys = {
+        pygame.K_1: 1.0,
+        pygame.K_2: 2.0,
+        pygame.K_4: 4.0,
+        pygame.K_8: 8.0,
+        pygame.K_KP_1: 1.0,
+        pygame.K_KP_2: 2.0,
+        pygame.K_KP_4: 4.0,
+        pygame.K_KP_8: 8.0,
+    }
     clock = pygame.time.Clock()
     acc = 0.0
     wall = 0.0
@@ -124,9 +142,11 @@ def run_window(sim: Simulation, screenshot: str | None, seconds: float) -> None:
                     city.drag((0, -pan_step))
                 elif ev.key == pygame.K_r:
                     sim = Simulation(sim.cfg, adaptive=sim.adaptive, incident_at=sim.incident_at, net=sim.net)
+                    ui.rows = snapshot_buses(sim)
                     acc = 0.0
-                elif ev.key in (pygame.K_1, pygame.K_2, pygame.K_4, pygame.K_8):
-                    ui.speed = float(pygame.key.name(ev.key))
+                    wall = 0.0
+                elif ev.key in speed_keys:
+                    ui.speed = speed_keys[ev.key]
         if not ui.paused:
             acc += real * ui.speed
             budget = time.perf_counter() + 0.012  # keep the window responsive at high speed
@@ -162,7 +182,7 @@ def main() -> None:
     args = ap.parse_args()
 
     if args.compare:
-        compare(args.seconds, args.seeds, args.map)
+        compare(args.seconds, args.seeds, args.map, demand=args.demand, incident_at=args.incident_at)
         return
     cfg = Config(seed=args.seed) if args.demand is None else Config(seed=args.seed, gate_demand=args.demand)
     sim = Simulation(cfg, adaptive=not args.fixed, incident_at=args.incident_at, map_name=args.map)

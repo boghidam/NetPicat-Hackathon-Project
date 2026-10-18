@@ -91,7 +91,7 @@ class BusFleet:
             seg = self.net.segments[b.seg]
             x, y, _, _ = self.net.position(seg.id, b.pos)
             rec = BusTelemetry(
-                b.id, now, x, y, seg.id, max(0.0, seg.stop_pos - b.pos), b.v, seg.speed_limit, b.delay,
+                b.id, now, x, y, seg.id, min(seg.stop_pos, max(0.0, seg.stop_pos - b.pos)), b.v, seg.speed_limit, b.delay,
                 line=b.line or "", leg=b.leg,
             )  # fmt: skip
             self.api.publish(rec)

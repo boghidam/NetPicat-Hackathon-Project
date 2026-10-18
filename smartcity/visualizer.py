@@ -11,7 +11,6 @@ from .hud import (
     AMBER,
     BG,
     CYAN,
-    DIM,
     KIND_COLOR,
     LIME,
     RED,
@@ -39,14 +38,14 @@ NODE_RING = (48, 58, 76)
 
 # Signal lights (vibrant, high-contrast traffic optics)
 SIGNAL = {
-    "G": (34, 197, 94),   # Emerald green
+    "G": (34, 197, 94),  # Emerald green
     "Y": (245, 158, 11),  # Amber
-    "R": (239, 68, 68),   # Crimson
+    "R": (239, 68, 68),  # Crimson
 }
 
 # Vehicle styling
-CAR = (147, 197, 253)         # Sky blue metallic
-CAR_OUTLINE = (15, 23, 42)    # Dark slate outline
+CAR = (147, 197, 253)  # Sky blue metallic
+CAR_OUTLINE = (15, 23, 42)  # Dark slate outline
 ROAD_WIDTH_M = {"primary": 12.0, "secondary": 10.0, "tertiary": 8.0}
 RING_KINDS = {"LOCAL_EXTEND", "PREDICTIVE_EXTEND", "THROTTLE"}
 
@@ -104,8 +103,8 @@ class CityView:
     def __init__(self, sim: Simulation, rect: pygame.Rect):
         self.rect = rect
         self.camera = Camera(rect, sim.net)
-        sans = "segoeui,inter,helveticaneue,arial,sans-serif"
-        mono = "consolas,jetbrainsmono,menlo,monospace"
+        sans = "helveticaneue,segoeui,inter,arial,sans-serif"
+        mono = "menlo,jetbrainsmono,consolas,dejavusansmono,monospace"
 
         self.label = pygame.font.SysFont(sans, 10, bold=True)
         self.chip = pygame.font.SysFont(mono, 10, bold=True)
@@ -204,12 +203,18 @@ class CityView:
 
         # Pass 1: Dark Casing for road boundary separation
         for pts, width, tier in drawn:
-            edge_color = ROAD_PRIMARY_EDGE if tier == "primary" else (ROAD_SECONDARY_EDGE if tier == "secondary" else ROAD_TERTIARY_EDGE)
+            edge_color = (
+                ROAD_PRIMARY_EDGE
+                if tier == "primary"
+                else (ROAD_SECONDARY_EDGE if tier == "secondary" else ROAD_TERTIARY_EDGE)
+            )
             pygame.draw.lines(surf, edge_color, False, pts, width + 2)
 
         # Pass 2: Road Surface Fills
         for pts, width, tier in drawn:
-            fill_color = ROAD_PRIMARY if tier == "primary" else (ROAD_SECONDARY if tier == "secondary" else ROAD_TERTIARY)
+            fill_color = (
+                ROAD_PRIMARY if tier == "primary" else (ROAD_SECONDARY if tier == "secondary" else ROAD_TERTIARY)
+            )
             pygame.draw.lines(surf, fill_color, False, pts, width)
             if width >= 5:
                 for p in pts:
@@ -233,8 +238,15 @@ class CityView:
             tw, th = self.label.size(lbl)
             w_cap = tw + 22
             h_cap = th + 6
-            bx = max(8, min(surf.get_width() - w_cap - 8, int(px - 4)))
-            by = max(8, min(surf.get_height() - h_cap - 8, int(py - th // 2 - 2)))
+            if px < -w_cap or px > surf.get_width() + w_cap or py < -h_cap or py > surf.get_height() + h_cap:
+                continue
+            by = int(py - h_cap // 2)
+            if int(px) - 8 + w_cap > surf.get_width() - 8:
+                bx = int(px) - w_cap + 8
+                pin_x, txt_x = bx + w_cap - 8, bx + 6
+            else:
+                bx = int(px) - 8
+                pin_x, txt_x = bx + 8, bx + 16
 
             capsule = pygame.Surface((w_cap, h_cap), pygame.SRCALPHA)
             pygame.draw.rect(capsule, (17, 24, 38, 225), (0, 0, w_cap, h_cap), border_radius=4)
@@ -242,8 +254,8 @@ class CityView:
             surf.blit(capsule, (bx, by))
 
             # Pin dot and label text
-            pygame.draw.circle(surf, CYAN, (bx + 8, by + h_cap // 2), 3)
-            surf.blit(self.label.render(lbl, True, (230, 238, 250)), (bx + 16, by + 3))
+            pygame.draw.circle(surf, CYAN, (pin_x, by + h_cap // 2), 3)
+            surf.blit(self.label.render(lbl, True, (230, 238, 250)), (txt_x, by + 3))
 
     # -- Dynamic Heat Layer ----------------------------------------------------
     def _heat(self, screen: pygame.Surface, sim: Simulation, ui: UiState) -> None:
@@ -251,7 +263,16 @@ class CityView:
             return
         cam = self.camera
         for seg in sim.net.segments:
-            load = sim.model.density(seg.id) if ui.heat == 1 else sim.coord.load[seg.id]
+            if ui.heat == 1:
+                load = sim.model.density(seg.id)
+            else:
+                if (
+                    sim.estimator.confidence(seg.id, sim.t) < 0.05
+                    and sim.coord.fc_load[seg.id] < 0.05
+                    and sim.loops.reading(seg.id) is None
+                ):
+                    continue
+                load = sim.coord.load[seg.id]
             if load < 0.15:
                 continue
             color = lerp(ROAD_PRIMARY, speed_color(1.0 - load), min(1.0, load * 1.5))
@@ -414,7 +435,8 @@ class CityView:
         screen.blit(self.banner.render(mode_str, True, TEXT), (x + 24, y + 6))
 
         heat_name = ("", "LINK DENSITY: TRUE WORLD", "LINK LOAD: ESTIMATED FROM BUSES")[ui.heat]
-        sub = heat_name if heat_name else f"IAȘI ARTERIAL CORRIDOR · {sum(n.signalised for n in sim.net.nodes)} SIGNALS"
+        corridor = "SYNTHETIC TEST GRID" if "synthetic" in sim.net.source else "IAȘI ARTERIAL CORRIDOR"
+        sub = heat_name if heat_name else f"{corridor} · {sum(n.signalised for n in sim.net.nodes)} SIGNALS"
         screen.blit(self.sub_banner.render(sub, True, (138, 150, 170)), (x + 24, y + 24))
 
     # -- Bottom-Left Interactive Legend Card -----------------------------------
@@ -436,7 +458,7 @@ class CityView:
         sx = x + 12
         screen.blit(self.legend_bold.render("SIGNALS:", True, (138, 150, 170)), (sx, ry1))
         sx += 52
-        for st, name, col in (("G", "Green", SIGNAL["G"]), ("Y", "Yellow", SIGNAL["Y"]), ("R", "Red", SIGNAL["R"])):
+        for _st, name, col in (("G", "Green", SIGNAL["G"]), ("Y", "Yellow", SIGNAL["Y"]), ("R", "Red", SIGNAL["R"])):
             pygame.draw.line(screen, col, (sx, ry1 + 5), (sx + 10, ry1 + 5), 3)
             screen.blit(self.legend_font.render(name, True, (210, 218, 230)), (sx + 14, ry1))
             sx += 52
@@ -463,7 +485,7 @@ class CityView:
             ("PREDICTIVE_EXTEND", "AI Forecast", KIND_COLOR["PREDICTIVE_EXTEND"]),
             ("THROTTLE", "Throttle", KIND_COLOR["THROTTLE"]),
         ]
-        for kind, name, col in events:
+        for _kind, name, col in events:
             pygame.draw.circle(screen, col, (ex + 4, ry2 + 5), 4, 2)
             screen.blit(self.legend_font.render(name, True, (210, 218, 230)), (ex + 12, ry2))
             ex += 94
