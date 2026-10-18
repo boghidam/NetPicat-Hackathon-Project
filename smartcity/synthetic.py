@@ -8,6 +8,9 @@ from __future__ import annotations
 
 from .network import EdgeData, GraphData, LocalProjection, RoadNetwork, RouteData
 
+GRID_GATE_BAND = 150.0  # m: only the nodes on the grid's own edge are gates
+GRID_MAX_GATES = 10
+
 
 def grid_data(rows: int = 4, cols: int = 4, spacing: float = 200.0, speed_kph: float = 50.0) -> GraphData:
     proj = LocalProjection(47.16, 27.58)

@@ -170,3 +170,50 @@ def test_the_dashboard_draws_at_the_extremes_with_rush_hour_on(screen, percent):
     city.draw(screen, sim, ui)
     hud.draw(screen, sim, ui)
     assert (percent == 0) == (not ui.rows)
+
+
+def test_every_line_in_the_city_has_its_own_colour(iasi_net):
+    import itertools
+    import math
+
+    from smartcity.hud import LINE_COLORS, line_color
+
+    sim = Simulation(Config(), net=iasi_net)
+    colours = [line_color(sim, r.ref) for r in iasi_net.routes]
+    assert len(set(colours)) == len(colours) == len(iasi_net.routes)  # no two lines share a colour
+    assert min(math.dist(a, b) for a, b in itertools.combinations(LINE_COLORS, 2)) > 40  # and they are tellable apart
+    assert line_color(sim, "nope") not in colours
+
+
+def test_the_legend_lists_every_line_and_only_one_badge_sits_in_a_crowded_spot(screen, iasi_net):
+    sim = Simulation(Config(seed=3, traffic_amount=3.0), net=iasi_net)
+    sim.run(30)
+    city, hud = make_views(sim)
+    ui = UiState(rows=snapshot_buses(sim))
+    shown = []
+    real_chip = city._chip
+    city._chip = lambda ref, color: shown.append(ref) or real_chip(ref, color)
+    screen.fill(BG)
+    city.draw(screen, sim, ui)
+    legend = shown[-len(iasi_net.routes) :]
+    assert legend == [r.ref for r in iasi_net.routes]  # all 18 lines are in the legend, in route order
+    badges = len(shown) - len(legend)
+    assert 0 < badges < len(sim.fleet.buses)  # 300 buses, but crowded spots get a single badge
+
+
+def test_cached_fonts_measure_and_render_once_and_stay_bounded():
+    from smartcity.hud import CachedFont, sysfont
+
+    pygame.init()
+    try:
+        font = sysfont("arial", 12)
+        assert isinstance(font, CachedFont)
+        assert font.render("L28", True, (255, 255, 255)) is font.render("L28", True, (255, 255, 255))
+        assert font.render("L28", True, (255, 255, 255)) is not font.render("L28", True, (0, 0, 0))
+        assert font.size("L28") == font._font.size("L28") and font.get_height() == font._font.get_height()
+        for i in range(CachedFont.LIMIT + 50):
+            font.size(f"n{i}")
+            font.render(f"n{i}", True, (1, 2, 3))
+        assert len(font._sizes) <= CachedFont.LIMIT and len(font._images) <= CachedFont.LIMIT
+    finally:
+        pygame.quit()

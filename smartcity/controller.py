@@ -71,12 +71,29 @@ class NetworkCoordinator:
         self.load = [cfg.est_prior_load] * n  # what the throttle acts on
         self.junction_load = [cfg.est_prior_load] * len(net.nodes)  # congestion at the end of each approach set
         self.dload = [0.0] * n  # worst downstream load an approach would release into
+        self.dload2 = [0.0] * n  # the same, one junction further on (second hop along the networkx graph)
         self._worst = [-1] * n
         self.throttle = [1.0] * n
         self._throttled: set[int] = set()
         self._ext_log: deque[tuple[float, int, float]] = deque()
         self._last_log: dict[tuple[str, int], float] = {}
         self._neighbours = {node.id: net.neighbours(node.id) for node in net.nodes}
+        self._hop2 = self._second_hops()
+
+    def _second_hops(self) -> list[list[int]]:
+        """For every approach, the edges two junctions on: walk the networkx graph out of the node each release
+        leads to, never turning straight back (the same rule as the turn targets)."""
+        net = self.net
+        reach: list[list[int]] = []
+        for seg in net.segments:
+            beyond: set[int] = set()
+            for first, _share in net.turn_targets(seg.id):
+                at = net.segments[first].to_node
+                for _u, _v, second in net.nx.out_edges(at, keys=True):
+                    if net.segments[second].to_node != net.segments[first].from_node or net.nx.out_degree(at) == 1:
+                        beyond.add(second)
+            reach.append(sorted(beyond))
+        return reach
 
     # -- names for logs and the HUD ------------------------------------------
     def label(self, seg_id: int) -> str:
@@ -127,6 +144,13 @@ class NetworkCoordinator:
                 if t_load > worst:
                     worst, worst_id = t_load, target
             self.dload[sid], self._worst[sid] = worst, worst_id
+            self.dload2[sid] = max(
+                (
+                    max(self.load[e], JUNCTION_WEIGHT * self.junction_load[net.segments[e].to_node])
+                    for e in self._hop2[sid]
+                ),
+                default=0.0,
+            )
             if not self.adaptive or seg.to_node not in self.controllers:
                 self.throttle[sid] = 1.0
                 self._throttled.discard(sid)
@@ -200,11 +224,26 @@ class NetworkCoordinator:
         return sorted((f for a in group for f in self.forecasts_for(a, now)), key=lambda f: f.eta)
 
     def downstream_openness(self, approach: int) -> float:
-        """1 when the edges an approach releases into are clear, 0 when they are blocked (no point extending)."""
+        """1 when the streets an approach feeds are clear, 0 when they are blocked (no point extending).
+
+        Looks two junctions down the networkx graph: a green that lets more through into a street whose
+        next junction is already jammed only grows the queue behind it, and a chain of such greens is how a
+        local jam turns into a network-wide gridlock. The worse of the two hops decides.
+        """
         cfg = self.cfg
-        return 1.0 - max(0.0, min(1.0, (self.dload[approach] - cfg.rho_gate) / (cfg.rho_block - cfg.rho_gate)))
+        span = cfg.rho_block - cfg.rho_gate
+        first = (self.dload[approach] - cfg.rho_gate) / span
+        second = (cfg.hop2_weight * self.dload2[approach] - cfg.rho_gate) / span
+        return 1.0 - max(0.0, min(1.0, max(first, second)))
 
     # -- extension budget ------------------------------------------------------
+    def budget_cap(self) -> float:
+        """Seconds of extension the whole network may add per window: it grows with the number of signals."""
+        cfg = self.cfg
+        if cfg.budget_seconds is not None:
+            return cfg.budget_seconds
+        return max(cfg.budget_min, cfg.budget_per_junction * len(self.controllers))
+
     def request_extension(self, node: int, seconds: float, now: float) -> float:
         cfg = self.cfg
         while self._ext_log and self._ext_log[0][0] < now - cfg.budget_window:
@@ -213,13 +252,14 @@ class NetworkCoordinator:
         neighbours = self._neighbours[node]
         recent_nb = {n for t, n, _ in self._ext_log if n in neighbours and t >= now - cfg.neighbour_window}
         damped = seconds / (1.0 + cfg.neighbour_damping * len(recent_nb))
-        granted = min(damped, cfg.budget_seconds - used)
+        cap = self.budget_cap()
+        granted = min(damped, cap - used)
         if granted < 1.0:
             self.log_once(
                 now,
                 "BUDGET_DENIED",
                 node,
-                f"n{node}: extension of {seconds:.1f}s denied (network budget {used:.0f}/{cfg.budget_seconds:.0f}s, "
+                f"n{node}: extension of {seconds:.1f}s denied (network budget {used:.0f}/{cap:.0f}s, "
                 f"{len(recent_nb)} neighbour(s) just extended)",
             )
             return 0.0
@@ -300,7 +340,7 @@ class IntersectionController:
                 self._used_forecasts.add(f.id)
                 self._extend(
                     now,
-                    cfg.pred_ext,
+                    cfg.pred_ext * coord.downstream_openness(f.target_segment),
                     "PREDICTIVE_EXTEND",
                     f"forecast for L{f.line} {f.source_bus}: +{f.predicted_delay:.0f}s delay, ETA {f.eta - now:.0f}s, "
                     f"conf {f.confidence:.2f}",

@@ -6,6 +6,7 @@ import math
 
 from smartcity.config import Config
 from smartcity.network import EdgeData, GraphData, LocalProjection, RoadNetwork
+from smartcity.synthetic import GRID_GATE_BAND, GRID_MAX_GATES
 
 PROJ = LocalProjection(47.16, 27.58)
 
@@ -33,8 +34,13 @@ def star_data(angles_deg: list[float], arm: float = 200.0, speed_kph: float = 50
     return GraphData(nodes, edges)
 
 
+def small_map_config() -> Config:
+    """The default config with the gate settings of a map a few hundred metres across (not the 700 m city band)."""
+    return Config(gate_band=GRID_GATE_BAND, max_gates=GRID_MAX_GATES)
+
+
 def star_net(angles_deg: list[float], cfg: Config | None = None, pad: float = 400.0) -> RoadNetwork:
-    return RoadNetwork(star_data(angles_deg, pad=pad), cfg or Config())
+    return RoadNetwork(star_data(angles_deg, pad=pad), cfg or small_map_config())
 
 
 def bent_net(cfg: Config | None = None) -> RoadNetwork:
@@ -46,4 +52,4 @@ def bent_net(cfg: Config | None = None) -> RoadNetwork:
         EdgeData(0, 0, 1, 200.0, 50.0, geometry, "secondary", "bend"),
         EdgeData(1, 1, 0, 200.0, 50.0, list(reversed(geometry)), "secondary", "bend"),
     ]
-    return RoadNetwork(GraphData(nodes, edges), cfg or Config())
+    return RoadNetwork(GraphData(nodes, edges), cfg or small_map_config())

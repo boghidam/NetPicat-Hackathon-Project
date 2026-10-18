@@ -6,12 +6,15 @@ import pytest
 
 from smartcity.data import DATA_DIR, load_iasi
 
+BACKBONE = ["20", "23", "28", "30", "36", "41", "42", "43", "47", "52"]
 
-def test_dataset_is_the_central_iasi_spine(iasi_net):
+
+def test_dataset_covers_the_whole_city(iasi_net):
     net = iasi_net
-    assert 250 <= len(net.nodes) <= 600 and 500 <= len(net.segments) <= 1200
-    assert sum(n.signalised for n in net.nodes) >= 50
-    assert 47.14 < net.proj.lat0 < 47.19 and 27.55 < net.proj.lon0 < 27.61  # really Iași
+    assert 200 <= len(net.nodes) <= 800 and 500 <= len(net.segments) <= 1500
+    assert sum(n.signalised for n in net.nodes) >= 100
+    assert 47.12 < net.proj.lat0 < 47.19 and 27.52 < net.proj.lon0 < 27.62  # really Iași
+    assert net.width >= 12_000 and net.height >= 10_000  # city-wide, not just the centre
     assert "OpenStreetMap" in net.source
     names = {s.name for s in net.segments}
     for street in ("Bd. Independenței", "Bd. Carol I", "Bd. Tudor Vladimirescu", "Str. Păcurari"):
@@ -21,7 +24,7 @@ def test_dataset_is_the_central_iasi_spine(iasi_net):
 
 def test_edges_have_real_lengths_and_speed_limits(iasi_net):
     for seg in iasi_net.segments:
-        assert 40.0 <= seg.length <= 1300.0
+        assert 40.0 <= seg.length <= 7000.0  # the outskirts have long stretches between junctions
         assert 20 / 3.6 <= seg.speed_limit <= 70 / 3.6
         assert seg.cum[-1] == pytest.approx(seg.length)
         assert 0 < seg.stop_pos < seg.length
@@ -29,14 +32,29 @@ def test_edges_have_real_lengths_and_speed_limits(iasi_net):
     assert 50 in kph and len(kph) > 2  # urban default plus other posted limits
 
 
-def test_requested_ctp_lines_are_present_and_contiguous(iasi_net):
-    refs = {r.ref for r in iasi_net.routes}
-    assert {"19", "28", "36", "41"} <= refs
+def test_the_city_has_16_to_20_ctp_lines_including_every_backbone_line(iasi_net):
+    refs = [r.ref for r in iasi_net.routes]
+    assert 16 <= len(refs) <= 20 and len(set(refs)) == len(refs)
+    assert set(BACKBONE) <= set(refs)  # 20, 23, 28, 30, 36, 41, 42, 43, 47 and 52 are all there
+    assert {r.ref for r in iasi_net.routes if r.backbone} == set(BACKBONE)  # and only they are flagged as backbone
     for route in iasi_net.routes:
         km = sum(iasi_net.segments[e].length for e in route.edges) / 1000
-        assert 3.0 < km < 30.0, route.name
+        assert 8.0 < km < 40.0, route.name  # a full loop: out and back
         for a, b in zip(route.edges, route.edges[1:] + route.edges[:1], strict=True):
             assert iasi_net.segments[a].to_node == iasi_net.segments[b].from_node
+
+
+def test_backbone_lines_run_along_the_streets_they_serve(iasi_net):
+    def streets(ref):
+        return {iasi_net.segments[e].name for e in iasi_net.route_by_ref[ref].edges}
+
+    assert "Bd. Independenței" in streets("28") and "Bd. Dacia" in streets("28")  # Dacia - Copou
+    assert "Șos. Nicolina" in streets("41")  # Blocuri Ciurea - Piața Independenței
+    assert {"Bd. Carol I", "Bd. Alexandru cel Bun"} <= streets("52")  # a line OSM lists without any stops
+    assert "Șos. Bucium" in streets("30") and "Str. Canta" in streets("30")  # Bucium - Canta
+    for ref in BACKBONE:
+        assert len(streets(ref)) >= 5, ref  # a real multi-street route, not a stub
+        assert len(set(iasi_net.route_by_ref[ref].edges)) >= 20, ref
 
 
 def test_routes_come_from_osm_relations_and_run_along_their_streets():
@@ -52,7 +70,7 @@ def test_routes_come_from_osm_relations_and_run_along_their_streets():
 
 def test_gates_exist_and_are_mutually_reachable(iasi_net):
     net = iasi_net
-    assert 6 <= len(net.gates) <= net.cfg.max_gates
+    assert 12 <= len(net.gates) <= net.cfg.max_gates  # spread all round the edge of the larger city
     for a in net.gates:
         for b in net.gates:
             if a != b:

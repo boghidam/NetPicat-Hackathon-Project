@@ -19,6 +19,7 @@ from .hud import (
     UiState,
     line_color,
     speed_color,
+    sysfont,
 )
 from .network import RoadNetwork
 from .simulation import Simulation
@@ -101,23 +102,27 @@ class Camera:
 
 
 class CityView:
+    LEGEND_PER_ROW = 9  # route chips per row in the legend
+    CHIP_CELL = (26, 16)  # px: at most one line badge per cell, so a crowded centre stays readable
+
     def __init__(self, sim: Simulation, rect: pygame.Rect):
         self.rect = rect
         self.camera = Camera(rect, sim.net)
         sans = "helveticaneue,segoeui,inter,arial,sans-serif"
         mono = "menlo,jetbrainsmono,consolas,dejavusansmono,monospace"
 
-        self.label = pygame.font.SysFont(sans, 10, bold=True)
-        self.chip = pygame.font.SysFont(mono, 10, bold=True)
-        self.banner = pygame.font.SysFont(sans, 14, bold=True)
-        self.sub_banner = pygame.font.SysFont(sans, 10)
-        self.legend_font = pygame.font.SysFont(sans, 9)
-        self.legend_bold = pygame.font.SysFont(sans, 9, bold=True)
+        self.label = sysfont(sans, 10, bold=True)
+        self.chip = sysfont(mono, 10, bold=True)
+        self.banner = sysfont(sans, 14, bold=True)
+        self.sub_banner = sysfont(sans, 10)
+        self.legend_font = sysfont(sans, 9)
+        self.legend_bold = sysfont(sans, 9, bold=True)
 
         self._layer = pygame.Surface(rect.size)
         self._layer_state: tuple | None = None  # (cx, cy, scale, show_lines)
         self._layer_time = 0.0
         self._chips: dict[str, pygame.Surface] = {}
+        self._stop_lines: dict[int, tuple[float, float, float, float]] = {}
         self._landmarks = list(sim.net.landmarks_ll)
 
     # -- Input helpers ---------------------------------------------------------
@@ -299,6 +304,13 @@ class CityView:
             pygame.draw.lines(screen, color, False, pts, max(3, int(6 * cam.scale)))
 
     # -- Signalized Junctions & Stop Lines -------------------------------------
+    def _stop_line(self, net: RoadNetwork, seg_id: int) -> tuple[float, float, float, float]:
+        """Where an approach stops on red (fixed for the run, so worked out once)."""
+        got = self._stop_lines.get(seg_id)
+        if got is None:
+            got = self._stop_lines[seg_id] = net.position(seg_id, net.segments[seg_id].stop_pos)
+        return got
+
     def _junctions(self, screen: pygame.Surface, sim: Simulation) -> None:
         cam, net = self.camera, sim.net
         r = max(2, int(sim.cfg.box_half * cam.scale))
@@ -320,8 +332,7 @@ class CityView:
 
             # Approach Stop-Lines (Crisp glowing bars with casing)
             for seg_id in ctl.approaches:
-                seg = net.segments[seg_id]
-                x, y, dx, dy = net.position(seg_id, seg.stop_pos)
+                x, y, dx, dy = self._stop_line(net, seg_id)
                 a = cam.to_screen(x - dy * half, y + dx * half)
                 b = cam.to_screen(x + dy * half, y - dx * half)
 
@@ -367,6 +378,11 @@ class CityView:
     ) -> tuple[float, float]:
         x, y, dx, dy = sim.net.position(v.seg, v.pos - v.length / 2)
         cx, cy = self.camera.to_screen(x, y)
+        self._draw_body(screen, cx, cy, dx, dy, length_px, width_px, color, outline)
+        return cx, cy
+
+    @staticmethod
+    def _draw_body(screen, cx, cy, dx, dy, length_px, width_px, color, outline) -> None:
         ux, uy = dx, -dy
         nx, ny = -uy, ux
         hl, hw = length_px / 2, width_px / 2
@@ -379,7 +395,6 @@ class CityView:
         ]
         pygame.draw.polygon(screen, color, pts)
         pygame.draw.polygon(screen, outline, pts, 1)
-        return cx, cy
 
     def _chip(self, ref: str, color) -> pygame.Surface:
         key = f"{ref}{color}"
@@ -392,8 +407,9 @@ class CityView:
         return self._chips[key]
 
     def _vehicles(self, screen: pygame.Surface, sim: Simulation) -> None:
-        cam = self.camera
+        cam, net = self.camera, sim.net
         view = self.rect.inflate(40, 40)
+        car_len, car_wid = max(6.0, sim.cfg.car_length * cam.scale), max(4.0, 2.0 * cam.scale * 1.3)
         buses = []
 
         for v in sim.model.iter_vehicles():
@@ -408,32 +424,35 @@ class CityView:
             elif v.kind == "bus":
                 buses.append(v)
             else:
-                x, y, _, _ = sim.net.position(v.seg, v.pos)
-                if view.collidepoint(cam.to_screen(x, y)):
-                    self._body(
-                        screen,
-                        sim,
-                        v,
-                        max(6.0, v.length * cam.scale),
-                        max(4.0, 2.0 * cam.scale * 1.3),
-                        CAR,
-                        CAR_OUTLINE,
-                    )
+                x, y, dx, dy = net.position(v.seg, v.pos - v.length / 2)  # one projection serves culling and drawing
+                cx, cy = cam.to_screen(x, y)
+                if view.collidepoint(cx, cy):
+                    self._draw_body(screen, cx, cy, dx, dy, car_len, car_wid, CAR, CAR_OUTLINE)
 
         # Buses rendered on top with speed ramp and route badge
+        taken: set[tuple[int, int]] = set()
+        cell_w, cell_h = self.CHIP_CELL
         for v in buses:
-            seg = sim.net.segments[v.seg]
-            col = speed_color(v.v / seg.speed_limit)
-            cx, cy = self._body(
+            x, y, dx, dy = net.position(v.seg, v.pos - v.length / 2)
+            cx, cy = cam.to_screen(x, y)
+            if not view.collidepoint(cx, cy):
+                continue
+            col = speed_color(v.v / net.segments[v.seg].speed_limit)
+            self._draw_body(
                 screen,
-                sim,
-                v,
+                cx,
+                cy,
+                dx,
+                dy,
                 max(11.0, v.length * cam.scale),
                 max(4.8, 2.6 * cam.scale * 1.3),
                 col,
                 (245, 250, 255),
             )
-            screen.blit(self._chip(v.line or "?", line_color(sim, v.line or "")), (cx + 6, cy - 14))
+            cell = (int(cx) // cell_w, int(cy) // cell_h)
+            if cell not in taken:  # a badge already sits here: show the bus body alone rather than pile badges up
+                taken.add(cell)
+                screen.blit(self._chip(v.line or "?", line_color(sim, v.line or "")), (cx + 6, cy - 14))
 
     # -- Rush-hour marker on the key point under pressure ------------------------
     def _rush_marker(self, screen: pygame.Surface, sim: Simulation) -> None:
@@ -471,7 +490,7 @@ class CityView:
         screen.blit(self.banner.render(mode_str, True, TEXT), (x + 24, y + 6))
 
         heat_name = ("", "LINK DENSITY: TRUE WORLD", "LINK LOAD: ESTIMATED FROM BUSES")[ui.heat]
-        corridor = "SYNTHETIC TEST GRID" if "synthetic" in sim.net.source else "IAȘI ARTERIAL CORRIDOR"
+        corridor = "SYNTHETIC TEST GRID" if "synthetic" in sim.net.source else "IAȘI CTP NETWORK"
         sub = heat_name if heat_name else f"{corridor} · {sum(n.signalised for n in sim.net.nodes)} SIGNALS"
         screen.blit(self.sub_banner.render(sub, True, (138, 150, 170)), (x + 24, y + 24))
 
@@ -494,7 +513,8 @@ class CityView:
     def _legend(self, screen: pygame.Surface, sim: Simulation, ui: UiState) -> None:
         # Floating legend container
         card_w = 480
-        card_h = 76 if not ui.show_lines else 94
+        rows = -(-len(sim.net.routes) // self.LEGEND_PER_ROW)  # route chips wrap onto as many rows as needed
+        card_h = 76 if not ui.show_lines else 74 + 20 * rows
         x = self.rect.x + 14
         y = self.rect.bottom - card_h - 12
 
@@ -548,11 +568,10 @@ class CityView:
         if ui.show_lines:
             ry3 = y + 48
             screen.blit(self.legend_bold.render("ROUTES:", True, (138, 150, 170)), (x + 12, ry3))
-            rx = x + 64
-            for route in sim.net.routes[:8]:
+            for i, route in enumerate(sim.net.routes):
                 c = line_color(sim, route.ref)
-                screen.blit(self._chip(route.ref, c), (rx, ry3 - 1))
-                rx += 38
+                row, col = divmod(i, self.LEGEND_PER_ROW)
+                screen.blit(self._chip(route.ref, c), (x + 64 + col * 44, ry3 - 1 + row * 20))
 
         # Bottom-Right Scale Bar
         scale_m = 500

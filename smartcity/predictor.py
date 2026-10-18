@@ -69,6 +69,8 @@ class PostIntersectionPredictor:
         self.net, self.cfg, self.events = net, cfg, events
         self._tracks: dict[str, _Track] = {}
         self._active: dict[int, Forecast] = {}
+        self._by_segment: dict[int, list[Forecast]] | None = None  # lookup rebuilt after any change to `_active`
+        self._indexed = 0  # how many forecasts the lookup was built from
         self._ids = itertools.count(1)
         self._train: deque[tuple[np.ndarray, float]] = deque(maxlen=cfg.pred_window)
         self._trained_total = 0
@@ -86,7 +88,12 @@ class PostIntersectionPredictor:
         return "RIDGE" if self._weights is not None else "EWMA"
 
     def incoming(self, seg_id: int, now: float) -> list[Forecast]:
-        return [f for f in self._active.values() if f.target_segment == seg_id and f.expires_at > now]
+        if self._by_segment is None or self._indexed != len(self._active):
+            index: dict[int, list[Forecast]] = {}  # the coordinator asks about every segment each refresh: index once
+            for f in self._active.values():
+                index.setdefault(f.target_segment, []).append(f)
+            self._by_segment, self._indexed = index, len(self._active)
+        return [f for f in self._by_segment.get(seg_id, ()) if f.expires_at > now]
 
     def active(self, now: float) -> list[Forecast]:
         return sorted((f for f in self._active.values() if f.expires_at > now), key=lambda f: f.eta)
@@ -96,6 +103,7 @@ class PostIntersectionPredictor:
         self._tracks.pop(bus_id, None)
         for fid in [f.id for f in self._active.values() if f.source_bus == bus_id]:
             del self._active[fid]
+        self._by_segment = None
 
     # -- telemetry intake --------------------------------------------------
     def on_telemetry(self, tel: BusTelemetry) -> None:
@@ -131,6 +139,7 @@ class PostIntersectionPredictor:
         # previous multi-hop forecasts from this bus are superseded by the fresh window issued below
         for fid in [f.id for f in self._active.values() if f.source_bus == tel.bus_id]:
             del self._active[fid]
+        self._by_segment = None
 
         track.history.append(_Leg(ratio, gain, duration))
         track.segment_id, track.start_t, track.delay_at_start = tel.segment_id, tel.t, tel.delay
@@ -203,6 +212,7 @@ class PostIntersectionPredictor:
             line=tel.line,
         )
         self._active[f.id] = f
+        self._by_segment = None
         self.issued += 1
         target = target_seg.to_node
         self.events.add(
@@ -219,6 +229,7 @@ class PostIntersectionPredictor:
         cfg = self.cfg
         forecast, x = track.pending  # type: ignore[misc]
         self._active.pop(forecast.id, None)
+        self._by_segment = None
         arrival = track.arrived_t if track.arrived_t is not None else tel.t
         limit = self.net.segments[forecast.target_segment].speed_limit
         err_ratio = abs(forecast.predicted_speed / limit - actual_ratio)

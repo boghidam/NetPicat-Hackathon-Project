@@ -55,6 +55,7 @@ class RouteData:
     name: str
     edges: list[int]  # cyclic, contiguous edge ids
     stops: list[tuple[float, float]] = field(default_factory=list)  # lat, lon
+    backbone: bool = False  # a major line that runs more buses
 
 
 # ---------------------------------------------------------------------------- projection
@@ -109,6 +110,7 @@ class Segment:
     heading_out: float  # direction of travel at the start
     highway: str = ""
     name: str = ""
+    tangents: tuple[tuple[float, float], ...] = ()  # unit direction of each polyline piece (for fast lookups)
 
     @property
     def arrives_from(self) -> str:
@@ -162,6 +164,7 @@ class RoadNetwork:
         self._paths: dict[tuple[int, int], list[int] | None] = {}
         self.routes: list[RouteData] = []
         self.route_by_ref: dict[str, RouteData] = {}
+        self.route_index: dict[str, int] = {}
         self.set_routes(routes or [])
 
     def set_routes(self, routes: list[RouteData]) -> None:
@@ -171,6 +174,7 @@ class RoadNetwork:
                 assert self.segments[a].to_node == self.segments[b].from_node, f"line {r.ref} is not contiguous"
         self.routes = routes
         self.route_by_ref = {r.ref: r for r in routes}
+        self.route_index = {r.ref: i for i, r in enumerate(routes)}
 
     # -- construction helpers ------------------------------------------------
     def _make_segment(self, e: EdgeData) -> Segment:
@@ -194,6 +198,11 @@ class RoadNetwork:
             e.id, e.u, e.v, e.length, speed, stop, tuple(pts), tuple(cum),
             heading_in=heading_at(e.length - span, e.length), heading_out=heading_at(0.0, span),
             highway=e.highway, name=e.name,
+            tangents=tuple(
+                ((b[0] - a[0]) / n, (b[1] - a[1]) / n)
+                for a, b in zip(pts, pts[1:], strict=False)
+                for n in [math.hypot(b[0] - a[0], b[1] - a[1]) or 1.0]
+            ),
         )  # fmt: skip
 
     @staticmethod
@@ -325,9 +334,8 @@ class RoadNetwork:
         (x0, y0), (x1, y1) = seg.points[i], seg.points[i + 1]
         span = seg.cum[i + 1] - seg.cum[i]
         f = (pos - seg.cum[i]) / span if span > 0 else 0.0
-        dx, dy = x1 - x0, y1 - y0
-        n = math.hypot(dx, dy) or 1.0
-        return x0 + dx * f, y0 + dy * f, dx / n, dy / n
+        tx, ty = seg.tangents[i]
+        return x0 + (x1 - x0) * f, y0 + (y1 - y0) * f, tx, ty
 
     def position(self, seg_id: int, pos: float) -> tuple[float, float, float, float]:
         """Like `point_at`, shifted to the right-hand lane: (x, y, dx, dy)."""

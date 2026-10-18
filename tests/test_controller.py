@@ -282,6 +282,49 @@ def test_grid_wide_budget_denies_extensions_when_exhausted():
     assert coord.request_extension(FOUR_WAY, 4.0, now=sim.cfg.budget_window + 5) > 0
 
 
+def test_a_jam_two_junctions_down_the_road_also_blocks_the_extension():
+    sim, ctl, coord, route, approach, gi = cycle_setup()
+    assert coord._hop2[approach]  # there are streets two junctions on, found by walking the networkx graph
+    first_hop = {t for t, _ in sim.net.turn_targets(approach)}
+    assert not (set(coord._hop2[approach]) & first_hop)
+    for edge in coord._hop2[approach]:
+        jam_link(sim, edge)  # the street right ahead is clear, but the ones behind the next junction are full
+    coord.refresh(0.5)
+    assert coord.dload[approach] < sim.cfg.rho_gate <= sim.cfg.rho_block < coord.dload2[approach]
+    assert coord.downstream_openness(approach) == pytest.approx(0.0)
+    feed_bus(sim, route, "B07", 140.0, 150.0, 0.0, 60.0)
+    start_green(sim, ctl, 60.0, 0.0)
+    assert ctl.planned == sim.cfg.base_green and sim.events.counts["LOCAL_EXTEND"] == 0
+
+
+def test_a_clear_road_two_junctions_on_leaves_the_extension_alone():
+    sim, ctl, coord, route, approach, gi = cycle_setup()
+    coord.refresh(0.5)
+    assert coord.downstream_openness(approach) == pytest.approx(1.0)
+    feed_bus(sim, route, "B07", 140.0, 150.0, 0.0, 60.0)
+    start_green(sim, ctl, 60.0, 0.0)
+    assert ctl.planned > sim.cfg.base_green and sim.events.counts["LOCAL_EXTEND"] == 1
+
+
+def test_a_forecast_into_a_jammed_street_is_not_pre_extended():
+    sim, ctl, coord, route, approach, gi = cycle_setup()
+    sim.predictor._active[99] = forecast(99, approach, eta_in=15.0)
+    coord.dload2[approach] = 1.0  # the junction after the next one is gridlocked
+    start_green(sim, ctl, 60.0, 0.0)
+    assert sim.events.counts["PREDICTIVE_EXTEND"] == 0 and ctl.planned == sim.cfg.base_green
+
+
+def test_the_extension_budget_grows_with_the_number_of_signals(iasi_net):
+    cfg = Config()
+    small = Simulation(cfg, map_name="grid")
+    big = Simulation(cfg, net=iasi_net)
+    assert small.coord.budget_cap() == cfg.budget_min  # a tiny network still gets a workable floor
+    assert big.coord.budget_cap() == pytest.approx(cfg.budget_per_junction * len(big.controllers))
+    assert big.coord.budget_cap() > 4 * small.coord.budget_cap()
+    fixed = Simulation(Config(budget_seconds=12.0), net=iasi_net)
+    assert fixed.coord.budget_cap() == 12.0  # an explicit cap still overrides
+
+
 def test_neighbour_extensions_damp_each_other():
     sim, ctl, coord = make()
     first = coord.request_extension(1, 8.0, now=0.0)  # node 1 is adjacent to node 5

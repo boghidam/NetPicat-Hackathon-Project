@@ -128,3 +128,85 @@ def test_toggling_modes_at_runtime_is_safe(grid):
     sim.set_adaptive(True)
     sim.run(60)
     assert sim.t > 179
+
+
+# -- the city-wide fleet -------------------------------------------------------------------
+
+
+def watch_a_big_fleet(sim, seconds):
+    """Run and check, every tick: lanes stay ordered, nothing runs a red, and the signal timings keep to SUMO's rules."""
+    segs, cfg = sim.net.segments, sim.cfg
+    before: dict[str, tuple[int, float]] = {}
+    crossings = 0
+    since = {n: (c.idx, c.phase, sim.t) for n, c in sim.controllers.items()}
+    seen: dict[str, list[float]] = {"GREEN": [], "YELLOW": [], "ALLRED": []}
+    skipped: set[int] = set()
+    for _ in range(int(seconds / cfg.dt)):
+        sim.step()
+        for n, c in sim.controllers.items():
+            idx, phase, start = since[n]
+            if (c.idx, c.phase) != (idx, phase):
+                if n in skipped:  # the first interval of each light is cut short by its staggered start
+                    seen[phase].append(round(sim.t - start, 1))
+                skipped.add(n)
+                since[n] = (c.idx, c.phase, sim.t)
+        for seg in segs:
+            lane = sim.model.lanes[seg.id]
+            for ahead, behind in zip(lane, lane[1:], strict=False):
+                assert behind.pos <= ahead.pos - ahead.length + 1e-6, f"vehicles overlap on edge {seg.id}"
+            for v in lane:
+                prev = before.get(v.id)
+                if prev and prev[0] == seg.id and prev[1] <= seg.stop_pos < v.pos:
+                    crossings += 1
+                    assert sim.coord.signal_state(seg.id) in ("G", "Y"), f"{v.id} ran a red on edge {seg.id}"
+                before[v.id] = (seg.id, v.pos)
+    return crossings, seen
+
+
+@pytest.mark.parametrize("percent", [100, 300])
+def test_a_big_fleet_stays_ordered_obeys_signals_and_keeps_the_sumo_timings(iasi_net, percent):
+    sim = Simulation(Config(seed=6, traffic_amount=percent / 100), adaptive=True, incident_at=40.0, net=iasi_net)
+    assert len(sim.fleet.buses) >= 100 * percent / 100
+    crossings, seen = watch_a_big_fleet(sim, 150)
+    assert crossings > 1000
+    cfg = sim.cfg
+    assert len(seen["GREEN"]) > 300
+    assert min(seen["GREEN"]) >= cfg.min_green  # 7 s at the very least (the standard timer is longer)
+    assert set(seen["YELLOW"]) == {cfg.yellow} and set(seen["ALLRED"]) == {cfg.all_red}  # 3 s, then 2 s all red
+
+
+def test_every_bus_of_a_big_fleet_is_tracked_by_the_detection_loops(iasi_net):
+    sim = Simulation(Config(seed=6, traffic_amount=3.0), adaptive=True, net=iasi_net)
+    sim.run(60)
+    assert len(sim.fleet.buses) == 300 and set(sim.loops.latest) == {b.id for b in sim.fleet.buses}
+    near = [r for r in sim.loops.readings.values() if r.count[2] > 0]  # buses inside the 300 m window
+    assert len(near) > 100  # many approaches see a bus coming at once
+    for r in near:
+        assert r.count[0] <= r.count[1] <= r.count[2]  # the 50 / 150 / 300 m windows nest
+
+
+def test_vehicles_move_smoothly_along_their_polylines_and_never_jump_across_nodes(iasi_net):
+    """Per tick a vehicle advances at most one tick of the fastest speed limit and moves on only to an edge that
+    starts where its last one ended; the only backward step is a merging vehicle falling in behind another."""
+    sim = Simulation(Config(seed=8, traffic_amount=3.0), adaptive=True, incident_at=30.0, net=iasi_net)
+    segs, cfg = sim.net.segments, sim.cfg
+    fastest = max(s.speed_limit for s in segs) * (1 + cfg.car_speed_var) * cfg.dt
+    back = cfg.bus_length + cfg.min_gap + fastest  # landing behind a bus that is itself still moving
+    prev: dict[str, tuple[int, float]] = {}
+    steps = 0
+    for _ in range(int(90 / cfg.dt)):
+        sim.step()
+        for v in sim.model.iter_vehicles():
+            if v.kind == "blocker":
+                continue
+            if v.id in prev:
+                seg_before, pos_before = prev[v.id]
+                if seg_before == v.seg:
+                    moved = v.pos - pos_before
+                else:
+                    assert segs[seg_before].to_node == segs[v.seg].from_node, f"{v.id} jumped between unconnected edges"
+                    moved = segs[seg_before].length - pos_before + v.pos
+                assert -back - 1e-6 <= moved <= fastest + 1e-6, f"{v.id} moved {moved:.2f} m in one tick"
+                steps += 1
+            prev[v.id] = (v.seg, v.pos)
+    assert steps > 100_000

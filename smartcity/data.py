@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from .config import Config
@@ -12,7 +13,7 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 
 def load_iasi(data_dir: Path | None = None) -> tuple[GraphData, list[RouteData]]:
-    """Road graph and CTP Iași bus routes for the central transit spine."""
+    """Road graph and CTP Iași bus routes for the whole city."""
     folder = data_dir or DATA_DIR
     core = json.loads((folder / "iasi_core.json").read_text(encoding="utf-8"))
     routes = json.loads((folder / "iasi_routes.json").read_text(encoding="utf-8"))
@@ -29,7 +30,14 @@ def load_iasi(data_dir: Path | None = None) -> tuple[GraphData, list[RouteData]]
         source=core["meta"].get("source", ""),
     )  # fmt: skip
     lines = [
-        RouteData(r["ref"], r["name"], r["edges"], [(s["lat"], s["lon"]) for s in r["stops"]]) for r in routes["routes"]
+        RouteData(
+            r["ref"],
+            r["name"],
+            r["edges"],
+            [(s["lat"], s["lon"]) for s in r["stops"]],
+            backbone=r.get("backbone", False),
+        )
+        for r in routes["routes"]
     ]
     return graph, lines
 
@@ -39,8 +47,10 @@ def build_city(name: str, cfg: Config) -> RoadNetwork:
     if name == "iasi":
         graph, routes = load_iasi()
         return RoadNetwork(graph, cfg, routes)
-    from .synthetic import grid_data, grid_routes
+    from .synthetic import GRID_GATE_BAND, GRID_MAX_GATES, grid_data, grid_routes
 
-    net = RoadNetwork(grid_data(), cfg)
+    # The test grid is a few hundred metres across: its gates are only the nodes on its edge, so the city-scale
+    # gate settings in the config (a 700 m band, up to 16 gates) do not apply to it.
+    net = RoadNetwork(grid_data(), replace(cfg, gate_band=GRID_GATE_BAND, max_gates=GRID_MAX_GATES))
     net.set_routes(grid_routes(net))
     return net

@@ -65,7 +65,20 @@ def test_normal_traffic_is_100_percent_and_changes_nothing(iasi_net):
     b.run(60)
     snap = lambda s: [(v.id, v.seg, round(v.pos, 6)) for v in s.model.iter_vehicles()]  # noqa: E731
     assert snap(a) == snap(b)
-    assert len(a.fleet.buses) == sum(a.fleet._base.values()) == 26
+    assert len(a.fleet.buses) == sum(a.fleet._base.values()) == 100
+
+
+def test_the_global_traffic_amount_in_the_config_sets_the_starting_traffic(iasi_net):
+    from smartcity import config
+
+    assert config.TRAFFIC_AMOUNT == 1.0 and Config().traffic_amount == config.TRAFFIC_AMOUNT  # 1.0 is 100%
+    normal = Simulation(Config(seed=4), net=iasi_net)
+    double = Simulation(Config(seed=4, traffic_amount=2.0), net=iasi_net)
+    assert normal.traffic_percent == 100 and double.traffic_percent == 200
+    assert len(double.fleet.buses) == 2 * len(normal.fleet.buses)
+    assert 1.7 * normal.model.n_cars <= double.model.n_cars <= 2.3 * normal.model.n_cars
+    none = Simulation(Config(seed=4, traffic_amount=0.0), net=iasi_net)
+    assert len(none.fleet.buses) == 0 and none.model.n_cars == 0
 
 
 def test_zero_percent_means_no_cars_and_no_buses(sim):
@@ -82,12 +95,12 @@ def test_zero_percent_means_no_cars_and_no_buses(sim):
 
 def test_buses_scale_with_the_percentage_and_cover_every_line(sim):
     lines = {r.ref for r in sim.net.routes}
-    for percent, total in ((10, 3), (50, 13), (150, 39), (300, 78), (1000, 260)):
+    for percent, total in ((10, 10), (50, 50), (150, 150), (300, 300), (1000, 1000)):
         sim.set_traffic_percent(percent)
         assert len(sim.fleet.buses) == total, percent
         assert sim.fleet.targets(percent).keys() == lines
     sim.set_traffic_percent(100)
-    assert len(sim.fleet.buses) == 26
+    assert len(sim.fleet.buses) == 100
     assert {b.line: 0 for b in sim.fleet.buses}.keys() == lines  # every line is back
     assert sorted(sim.fleet.targets(100).values()) == sorted(sim.fleet._base.values())
 
@@ -108,7 +121,7 @@ def test_lowering_thins_the_cars_and_buses_straight_away(sim):
     before = sim.model.n_cars
     sim.set_traffic_percent(50)
     assert 0.35 * before <= sim.model.n_cars <= 0.65 * before
-    assert len(sim.fleet.buses) == 13
+    assert len(sim.fleet.buses) == 50
     sim.run(30)
     no_overlaps(sim)
 
@@ -146,7 +159,7 @@ def test_buses_taken_off_the_map_are_forgotten_by_every_consumer(sim):
 def test_going_back_up_from_zero_restores_a_normal_fleet_and_some_cars(sim):
     sim.set_traffic_percent(0)
     sim.set_traffic_percent(100)
-    assert len(sim.fleet.buses) == 26
+    assert len(sim.fleet.buses) == 100
     assert sim.model.n_cars >= 0.7 * sim.cfg.initial_cars
     sim.run(60)
     no_overlaps(sim)
@@ -158,7 +171,7 @@ def test_a_full_boosted_minute_keeps_every_lane_ordered(sim):
     for _ in range(int(60 / sim.cfg.dt)):
         sim.step()
     no_overlaps(sim)
-    assert len(sim.fleet.buses) == 260 and sim.model.n_cars > 1000
+    assert len(sim.fleet.buses) == 1000 and sim.model.n_cars > 1000
 
 
 # -- rush hour at a key point -----------------------------------------------------------

@@ -34,16 +34,28 @@ MAGENTA = (236, 72, 153)  # Rose (metering / throttling)
 ORANGE = (249, 115, 22)  # Amber orange (extensions)
 VIOLET = (139, 92, 246)  # Violet
 
-# CTP Transit Authority Line Palette (Clean, distinct transit colors)
+# CTP line palette: one distinct colour per line (assigned in route order), enough for every line in the city
 LINE_COLORS = [
-    (14, 165, 233),  # Line 19: Sky Blue
-    (168, 85, 247),  # Line 28: Purple
-    (249, 115, 22),  # Line 36: Orange
-    (34, 197, 94),  # Line 41: Emerald
-    (236, 72, 153),  # Line 20: Rose
-    (234, 179, 8),  # Line 42: Gold
-    (99, 102, 241),  # Line 43: Indigo
-    (20, 184, 166),  # Line 47: Teal
+    (14, 165, 233),  # sky blue
+    (168, 85, 247),  # purple
+    (249, 115, 22),  # orange
+    (34, 197, 94),  # emerald
+    (236, 72, 153),  # rose
+    (234, 179, 8),  # gold
+    (99, 102, 241),  # indigo
+    (20, 184, 166),  # teal
+    (163, 230, 53),  # lime
+    (34, 211, 238),  # cyan
+    (248, 113, 113),  # coral
+    (232, 121, 249),  # fuchsia
+    (59, 130, 246),  # blue
+    (134, 239, 172),  # mint
+    (196, 181, 253),  # lavender
+    (253, 186, 116),  # apricot
+    (125, 211, 252),  # ice
+    (254, 240, 138),  # lemon
+    (94, 234, 212),  # aqua
+    (190, 150, 110),  # sand
 ]
 
 KIND_COLOR = {
@@ -82,8 +94,8 @@ def speed_color(ratio: float) -> tuple[int, int, int]:
 
 
 def line_color(sim: Simulation, ref: str) -> tuple[int, int, int]:
-    refs = [r.ref for r in sim.net.routes]
-    return LINE_COLORS[refs.index(ref) % len(LINE_COLORS)] if ref in refs else TEXT_MUTED
+    i = sim.net.route_index.get(ref)
+    return TEXT_MUTED if i is None else LINE_COLORS[i % len(LINE_COLORS)]
 
 
 @dataclass
@@ -144,6 +156,51 @@ def snapshot_buses(sim: Simulation, n: int = 10) -> list[BusRow]:
     return rows[:n]
 
 
+class CachedFont:
+    """A pygame font that remembers what it measured and drew.
+
+    The HUD and the map labels draw hundreds of short strings every frame, most of them identical from one
+    frame to the next. Measuring and rendering are the slow parts, so both are memoised (bounded, so a
+    stream of ever-changing numbers cannot grow the cache without limit). Rendered surfaces are shared and
+    must be treated as read-only; every other font method falls through to the real font.
+    """
+
+    LIMIT = 1500
+
+    def __init__(self, font: pygame.font.Font):
+        self._font = font
+        self._sizes: dict[str, tuple[int, int]] = {}
+        self._images: dict[tuple, pygame.Surface] = {}
+
+    def size(self, text: str) -> tuple[int, int]:
+        got = self._sizes.get(text)
+        if got is None:
+            if len(self._sizes) >= self.LIMIT:
+                self._sizes.clear()
+            got = self._sizes[text] = self._font.size(text)
+        return got
+
+    def render(self, text: str, antialias: bool, color, background=None) -> pygame.Surface:
+        key = (text, antialias, tuple(color), None if background is None else tuple(background))
+        img = self._images.get(key)
+        if img is None:
+            if len(self._images) >= self.LIMIT:
+                self._images.clear()
+            img = self._images[key] = (
+                self._font.render(text, antialias, color)
+                if background is None
+                else self._font.render(text, antialias, color, background)
+            )
+        return img
+
+    def __getattr__(self, name: str):
+        return getattr(self._font, name)
+
+
+def sysfont(names: str, size: int, bold: bool = False) -> CachedFont:
+    return CachedFont(pygame.font.SysFont(names, size, bold=bold))
+
+
 class Hud:
     def __init__(self, rect: pygame.Rect):
         self.rect = rect
@@ -151,19 +208,19 @@ class Hud:
         mono = "menlo,jetbrainsmono,consolas,dejavusansmono,monospace"
 
         # Typographic scale
-        self.font_brand = pygame.font.SysFont(sans, 13, bold=True)
-        self.font_card_title = pygame.font.SysFont(sans, 11, bold=True)
-        self.font_sans_sub = pygame.font.SysFont(sans, 10)
-        self.font_sans_bold = pygame.font.SysFont(sans, 10, bold=True)
-        self.font_badge = pygame.font.SysFont(sans, 9, bold=True)
+        self.font_brand = sysfont(sans, 13, bold=True)
+        self.font_card_title = sysfont(sans, 11, bold=True)
+        self.font_sans_sub = sysfont(sans, 10)
+        self.font_sans_bold = sysfont(sans, 10, bold=True)
+        self.font_badge = sysfont(sans, 9, bold=True)
 
-        self.font_kpi_val = pygame.font.SysFont(sans, 16, bold=True)
-        self.font_kpi_lbl = pygame.font.SysFont(sans, 9, bold=True)
-        self.font_kpi_sub = pygame.font.SysFont(sans, 9)
+        self.font_kpi_val = sysfont(sans, 16, bold=True)
+        self.font_kpi_lbl = sysfont(sans, 9, bold=True)
+        self.font_kpi_sub = sysfont(sans, 9)
 
-        self.font_mono = pygame.font.SysFont(mono, 11)
-        self.font_mono_bold = pygame.font.SysFont(mono, 11, bold=True)
-        self.font_mono_small = pygame.font.SysFont(mono, 10)
+        self.font_mono = sysfont(mono, 11)
+        self.font_mono_bold = sysfont(mono, 11, bold=True)
+        self.font_mono_small = sysfont(mono, 10)
 
         # Backward compatibility for existing code / tests
         self.font = self.font_mono

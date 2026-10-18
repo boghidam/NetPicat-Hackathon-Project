@@ -4,14 +4,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+# Global traffic multiplier: 1.0 is 100% traffic. It scales the bus fleet and the car spawn rate together, so
+# 2.0 doubles both and 0.0 empties the map. The runtime keys ([ ] and \) start from this value and move it.
+TRAFFIC_AMOUNT = 1.0
+
 
 @dataclass(frozen=True)
 class Config:
+    traffic_amount: float = TRAFFIC_AMOUNT
+
     # --- road network ----------------------------------------------------
     box_half: float = 14.0  # m from an intersection centre to its stop lines (half the junction box)
     min_approaches: int = 3  # a node with at least this many incoming roads gets signals
-    gate_band: float = 150.0  # m: nodes this close to the map edge can be gates where cars enter and leave
-    max_gates: int = 10
+    gate_band: float = 700.0  # m: nodes this close to the map edge can be gates where cars enter and leave
+    max_gates: int = 16
     seed: int = 7
 
     # --- simulation clock ------------------------------------------------
@@ -30,17 +36,22 @@ class Config:
     lane_offset: float = 3.0  # m lateral offset so opposite directions don't overlap
 
     # --- cars ------------------------------------------------------------
-    gate_demand: float = 0.08  # veh/s entering at each gate
-    initial_cars: int = 150
+    gate_demand: float = 0.03  # veh/s entering at each gate
+    initial_cars: int = 450
     spawn_backlog_max: int = 40  # cars waiting outside a blocked gate before new ones are dropped
 
     # --- rush hour at a key point (runtime option) ----------------------------
     rush_extra: float = 2.0  # extra car demand at every gate, as a multiple of normal, routed through the key point
+    rush_reach: float = 2000.0  # m: the seeded commuters are placed this close (along their trip) to the key point
     rush_seed: int = 120  # cars placed on routes through the key point the moment rush hour starts (at 100% traffic)
 
     # --- buses -----------------------------------------------------------
-    bus_headway_m: float = 3500.0  # one bus per this much route length (at least 2 per line)
-    max_buses_per_line: int = 5
+    # At 100% traffic: 4 buses active on each standard line; the backbone lines carry more (6 to 8, the longer
+    # the line the more), always spaced evenly along their loop so they never bunch up.
+    buses_per_line: int = 4
+    backbone_buses_min: int = 6
+    backbone_buses_max: int = 8
+    backbone_headway_m: float = 3300.0  # backbone buses = loop length / this, clamped to the range above
 
     # --- signals (SUMO-style safety timings) ----------------------------------
     # Opposite streets are green together; yellow then all-red clears the box between phases.
@@ -69,8 +80,13 @@ class Config:
     # --- global optimisation --------------------------------------------
     rho_gate: float = 0.65  # downstream load above which releases are metered
     rho_block: float = 0.85  # downstream load at which an approach is released at zero rate
+    hop2_weight: float = 0.95  # how much the second junction downstream counts against lengthening a green
     budget_window: float = 60.0  # s
-    budget_seconds: float = 90.0  # max total extension seconds per window across the network
+    budget_per_junction: float = (
+        1.2  # extension seconds per signalised junction per window: the cap grows with the network
+    )
+    budget_min: float = 30.0  # s: the floor for a small network, where 1.2 s per signal would allow almost nothing
+    budget_seconds: float | None = None  # an explicit network-wide cap that replaces the per-junction one
     neighbour_window: float = 20.0
     neighbour_damping: float = 0.5
 

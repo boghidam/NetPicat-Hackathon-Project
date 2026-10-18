@@ -65,7 +65,11 @@ class Simulation:
         self.traffic_percent = 100.0  # cars and buses relative to normal, 0 to 1000
         self.rush_point: str | None = None  # name of the key point under rush-hour pressure
         self._since_refresh = cfg.decision_period  # force an initial refresh
+        if cfg.traffic_amount != 1.0:  # the world is built at 100%; scale it to the configured TRAFFIC_AMOUNT
+            self.set_traffic_percent(cfg.traffic_amount * 100.0)
         # metrics
+        self._metrics_key: tuple | None = None
+        self._metrics: dict[str, float] = {}
         self.slow_ema = 0.0  # recent mean fraction of time buses lose to delay
         self.peak_density = 0.0
         self.coord.refresh(0.0)
@@ -194,6 +198,14 @@ class Simulation:
 
     # -- metrics -----------------------------------------------------------------
     def metrics(self) -> dict[str, float]:
+        """KPIs as of now. The HUD asks every frame but they only change with the clock, so one tick's answer is
+        reused until the next tick (or until the fleet or car count changes)."""
+        key = (self.t, len(self.fleet.buses), self.model.n_cars)
+        if self._metrics_key != key:
+            self._metrics_key, self._metrics = key, self._compute_metrics()
+        return dict(self._metrics)
+
+    def _compute_metrics(self) -> dict[str, float]:
         buses = self.fleet.buses
         elapsed = sum(b.elapsed for b in buses) or 1.0
         return {

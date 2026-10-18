@@ -112,7 +112,7 @@ class TrafficModel:
             if placed >= n:
                 break
             route = self.net.random_trip(self.rng) if via is None else self.trip_via(via)
-            leg = self.rng.randrange(len(route))
+            leg = self.rng.randrange(len(route)) if via is None else self._leg_near(route, via)
             seg = self.net.segments[route[leg]]
             pos = self.rng.uniform(5.0, max(6.0, seg.stop_pos - 4.0))
             if self._free_at(seg.id, pos, self.cfg.car_length):
@@ -121,10 +121,25 @@ class TrafficModel:
                 placed += 1
         return placed
 
+    def _leg_near(self, route: list[int], node: int) -> int:
+        """A random leg of a trip that passes `node`, within `rush_reach` metres of it: the build-up around a
+        key point (trips on the whole city are long, so cars spread along their entire length would hardly
+        load the junction)."""
+        segs = self.net.segments
+        ends, total = [], 0.0
+        for e in route:
+            total += segs[e].length
+            ends.append(total)
+        at = next((i for i, e in enumerate(route) if segs[e].to_node == node), None)
+        if at is None:
+            return self.rng.randrange(len(route))
+        near = [i for i, e in enumerate(route) if abs(ends[i] - segs[e].length / 2 - ends[at]) <= self.cfg.rush_reach]
+        return self.rng.choice(near or [at])
+
     def trip_via(self, node: int) -> list[int]:
         """A gate-to-gate path that goes through `node` (a rush-hour commute), without a U-turn there."""
         net = self.net
-        for _ in range(12):
+        for _ in range(40):  # many gate pairs have the key point "behind" them, which would need a U-turn there
             a, b = self.rng.sample(net.gates, 2)
             into, out = net.path_between(a, node), net.path_between(node, b)
             if into and out and net.segments[out[0]].to_node != net.segments[into[-1]].from_node:

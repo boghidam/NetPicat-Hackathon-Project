@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import random
+from bisect import bisect_right
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -68,22 +69,27 @@ class BusFleet:
         self.rng = rng
         self.on_remove: list[Callable[[str], None]] = []  # called with the id of every bus taken off the map
         self._base: dict[str, int] = {}  # buses per line at 100% traffic
-        n = 0
+        self._cum: dict[str, tuple[list[float], float]] = {}  # per line: where each edge starts along the loop, total
+        self._next_id = 0
         for line in net.routes:
             lengths = [net.segments[s].length for s in line.edges]
             total = sum(lengths)
-            count = max(2, min(cfg.max_buses_per_line, round(total / cfg.bus_headway_m)))
+            starts = [sum(lengths[:i]) for i in range(len(lengths))]
+            self._cum[line.ref] = (starts, total)
+            count = self.base_count(line.backbone, total)
             self._base[line.ref] = count
             for k in range(count):
-                # Spread the buses of one line evenly along its loop, with a little jitter.
-                offset = (k / count) * total + rng.uniform(0, 40)
-                leg, pos = 0, offset
-                while pos >= lengths[leg]:
-                    pos -= lengths[leg]
-                    leg = (leg + 1) % len(lengths)
-                world.add_bus(f"B{n:02d}", line.ref, line.edges, leg, pos)
-                n += 1
-        self._next_id = n
+                # Staggered departures: the buses of one line start evenly spaced around its loop (equal headways)
+                # with a little jitter, so none ever starts on top of another (or on a bus of a crossing line).
+                self._place(line.ref, (k / count) * total + rng.uniform(0, 40))
+
+    def base_count(self, backbone: bool, loop_length: float) -> int:
+        """Buses on a line at 100% traffic: 4 on a standard line, 6 to 8 on a backbone line (more on longer ones)."""
+        cfg = self.cfg
+        if not backbone:
+            return cfg.buses_per_line
+        wanted = round(loop_length / cfg.backbone_headway_m)
+        return max(cfg.backbone_buses_min, min(cfg.backbone_buses_max, wanted))
 
     @property
     def buses(self) -> list[Vehicle]:
@@ -99,26 +105,61 @@ class BusFleet:
             counts[ref] += 1  # largest remainder, so the total is exact
         return counts
 
+    # -- keeping headways even ---------------------------------------------------
+    _NUDGES = (0.0, 9.0, -9.0, 18.0, -18.0, 27.0, -27.0, 40.0, -40.0, 60.0, -60.0, 90.0, -90.0, 140.0, -140.0)
+
+    def _place(self, ref: str, offset: float) -> bool:
+        """Put a new bus of this line at `offset` m along its loop, or the closest free spot if that one is taken."""
+        route = self.net.route_by_ref[ref]
+        for nudge in self._NUDGES:
+            leg, pos = self._locate(ref, offset + nudge)
+            if self.world.try_place_bus(f"B{self._next_id:02d}", ref, route.edges, leg, pos):
+                self._next_id += 1
+                return True
+        return False
+
+    def _locate(self, ref: str, offset: float) -> tuple[int, float]:
+        """Edge index and position along it for a distance along the line's loop."""
+        starts, total = self._cum[ref]
+        offset %= total
+        leg = bisect_right(starts, offset) - 1
+        return leg, offset - starts[leg]
+
+    def _offset(self, bus: Vehicle) -> float:
+        return self._cum[bus.line or ""][0][bus.leg] + bus.pos
+
+    def _gap_midpoints(self, ref: str) -> list[float]:
+        """Loop positions in the middle of each gap between neighbouring buses, widest gap first."""
+        total = self._cum[ref][1]
+        offs = sorted(self._offset(b) for b in self.world.buses if b.line == ref)
+        if not offs:
+            return [0.0]
+        gaps = [(offs[(i + 1) % len(offs)] - offs[i]) % total or total for i in range(len(offs))]
+        order = sorted(range(len(offs)), key=lambda i: -gaps[i])
+        return [(offs[i] + gaps[i] / 2) % total for i in order]
+
+    def _victim(self, ref: str) -> Vehicle:
+        """The bus whose removal leaves the most even spacing (the one between the two narrowest gaps)."""
+        total = self._cum[ref][1]
+        mine = sorted((b for b in self.world.buses if b.line == ref), key=self._offset)
+        if len(mine) < 3:
+            return mine[-1]
+        offs = [self._offset(b) for b in mine]
+        merged = [(offs[(i + 1) % len(offs)] - offs[i - 1]) % total for i in range(len(mine))]
+        return mine[min(range(len(mine)), key=lambda i: (merged[i], -int(mine[i].id[1:])))]
+
     def set_percent(self, percent: float) -> None:
-        """Add buses along their lines or take the most recently added ones off the map."""
+        """Add buses into the widest gaps of their lines, or take buses off so the rest stay evenly spaced."""
         for ref, want in self.targets(percent).items():
-            route = self.net.route_by_ref[ref]
-            mine = sorted((b for b in self.world.buses if b.line == ref), key=lambda b: b.id)
-            for bus in reversed(mine[want:]):
+            mine = [b for b in self.world.buses if b.line == ref]
+            for _ in range(max(0, len(mine) - want)):
+                bus = self._victim(ref)
                 self.world.remove_vehicle(bus)
                 for forget in self.on_remove:
                     forget(bus.id)
-            lengths = [self.net.segments[e].length for e in route.edges]
-            total = sum(lengths)
             for _ in range(max(0, want - len(mine))):
-                for _attempt in range(60):  # a spot along the line that is free right now
-                    leg, pos = 0, self.rng.uniform(0.0, total)
-                    while pos >= lengths[leg]:
-                        pos -= lengths[leg]
-                        leg += 1
-                    if self.world.try_place_bus(f"B{self._next_id:02d}", ref, route.edges, leg, pos):
-                        self._next_id += 1
-                        break
+                if not any(self._place(ref, mid) for mid in self._gap_midpoints(ref)):
+                    break  # no room anywhere on the line right now
 
     def emit(self, now: float) -> list[BusTelemetry]:
         """Publish one telemetry record per bus (a high-rate AVL feed)."""

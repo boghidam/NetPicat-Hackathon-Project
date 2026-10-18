@@ -26,7 +26,7 @@ def test_every_bus_publishes_each_tick_with_all_fields():
     got = []
     api.subscribe(got.append)
     out = fleet.emit(0.0)
-    assert len(out) == len(fleet.buses) == len(got) == 18
+    assert len(out) == len(fleet.buses) == len(got) == sum(fleet._base.values())
     rec = got[0]
     seg = net.segments[rec.segment_id]
     assert rec.bus_id.startswith("B") and 0 <= rec.dist_to_next_node <= seg.stop_pos
@@ -75,14 +75,46 @@ def test_buses_follow_their_line_strictly_and_loop_forever():
     assert max(len(v) for v in visited.values()) >= 6  # they really travel, not just sit at the start
 
 
-def test_each_ctp_line_gets_buses_proportional_to_its_length():
+def test_standard_lines_get_4_buses_and_backbone_lines_6_to_8():
     cfg, net, world, api, fleet = make("iasi")
     per_line = {}
     for b in world.buses:
         per_line[b.line] = per_line.get(b.line, 0) + 1
     assert set(per_line) == {r.ref for r in net.routes}
-    assert all(2 <= n <= cfg.max_buses_per_line for n in per_line.values())
-    assert per_line["28"] >= per_line["41"]  # the long line has at least as many as the short one
+    for route in net.routes:
+        if route.backbone:
+            assert cfg.backbone_buses_min <= per_line[route.ref] <= cfg.backbone_buses_max, route.ref
+        else:
+            assert per_line[route.ref] == cfg.buses_per_line == 4, route.ref
+    assert len(world.buses) >= 100  # a city-wide fleet at normal traffic
+    assert per_line["30"] >= per_line["36"]  # a longer loop never gets fewer buses than a shorter one
+
+
+def test_buses_of_one_line_start_evenly_staggered_around_its_loop():
+    cfg, net, world, api, fleet = make("iasi")
+    for route in net.routes:
+        total = fleet._cum[route.ref][1]
+        offsets = sorted(fleet._offset(b) for b in world.buses if b.line == route.ref)
+        gaps = [(offsets[(i + 1) % len(offsets)] - offsets[i]) % total for i in range(len(offsets))]
+        even = total / len(offsets)
+        assert min(gaps) > 0.6 * even and max(gaps) < 1.4 * even, (route.ref, [round(g) for g in gaps])
+
+
+def test_added_buses_go_into_the_widest_gap_so_headways_stay_even():
+    cfg, net, world, api, fleet = make("iasi")
+    fleet.set_percent(200)
+    for route in net.routes:
+        total = fleet._cum[route.ref][1]
+        offsets = sorted(fleet._offset(b) for b in world.buses if b.line == route.ref)
+        assert len(offsets) == 2 * fleet._base[route.ref]
+        gaps = [(offsets[(i + 1) % len(offsets)] - offsets[i]) % total for i in range(len(offsets))]
+        assert min(gaps) > 0.5 * total / len(offsets), route.ref  # nobody was dropped on top of a neighbour
+    fleet.set_percent(50)
+    for route in net.routes:
+        total = fleet._cum[route.ref][1]
+        offsets = sorted(fleet._offset(b) for b in world.buses if b.line == route.ref)
+        gaps = [(offsets[(i + 1) % len(offsets)] - offsets[i]) % total for i in range(len(offsets))]
+        assert max(gaps) < 2.5 * total / len(offsets), route.ref  # thinning keeps the remaining buses spread out
 
 
 def test_fleet_is_deterministic_for_a_seed():

@@ -1,6 +1,6 @@
 """Entry point: interactive demo, headless comparison, or a single screenshot.
 
-python -m smartcity.main                       # interactive window (Iași, central transit spine)
+python -m smartcity.main                       # interactive window (Iași, 18 CTP bus lines)
 python -m smartcity.main --incident-at 60      # stall a vehicle on the busiest bus corridor after 60 s
 python -m smartcity.main --map grid            # the small synthetic city instead
 python -m smartcity.main --traffic 300         # three times the normal cars and buses (0 to 1000)
