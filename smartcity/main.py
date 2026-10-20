@@ -18,6 +18,7 @@ import time
 
 from .config import Config
 from .data import build_city
+from .learning import LEARNED_KINDS, merge_memories, save_memory, train_policy
 from .simulation import Simulation
 
 
@@ -27,21 +28,33 @@ def compare(
     map_name: str,
     demand: float | None = None,
     incident_at: float | None = None,
+    traffic: float | None = None,
+    rush: str | None = None,
 ) -> None:
     cfg = Config() if demand is None else Config(gate_demand=demand)
     inc = 120.0 if incident_at is None else incident_at
     net = build_city(map_name, cfg)  # the network is shared; each run builds its own world
+    extras = []
+    if traffic is not None:
+        extras.append(f"traffic {traffic:g}%")
+    if rush is not None:
+        extras.append(f"rush hour at {rush}")
+    extra_str = f" ({', '.join(extras)})" if extras else ""
     print(
-        f"{map_name}: a vehicle stalls on the busiest bus corridor at t={inc:.0f} s; {seeds} seeds x {seconds:.0f} s each.\n"
+        f"{map_name}{extra_str}: a vehicle stalls on the busiest bus corridor at t={inc:.0f} s; "
+        f"{seeds} seeds x {seconds:.0f} s each.\n"
     )
     print(
         f"{'mode':<10} {'bus time lost':>14} {'car speed':>10} {'jam edge-s':>11} {'cars exited':>12} {'adjustments':>12}"
     )
+    memories: list[dict] = []
+    dec = wst = mis = 0
     for adaptive in (False, True):
         lost = speed = jam = thr = ovr = 0.0
         for seed in range(1, seeds + 1):
             run_cfg = Config(seed=seed) if demand is None else Config(seed=seed, gate_demand=demand)
-            sim = Simulation(run_cfg, adaptive=adaptive, incident_at=inc, net=net)
+            sim = Simulation(run_cfg, adaptive=adaptive, incident_at=inc, net=net, map_name=map_name)
+            apply_start_options(sim, traffic, rush)
             for _ in range(int(seconds / 5)):
                 sim.run(5)
                 jam += 5 * sum(sim.model.density(s.id) > 0.5 for s in net.segments)
@@ -52,9 +65,23 @@ def compare(
                 thr + m["throughput"],
                 ovr + m["overrides"],
             )
+            if adaptive and sim.coord.learner is not None:
+                lrn = sim.coord.learner
+                memories.append(lrn.memory())
+                for kind in LEARNED_KINDS:
+                    dec += lrn.outcomes[kind]["decisive"]
+                    wst += lrn.outcomes[kind]["wasted"]
+                    mis += lrn.outcomes[kind]["missed"]
         n = seeds
         name = "adaptive" if adaptive else "fixed"
         print(f"{name:<10} {lost / n:>14.1%} {speed / n:>10.0%} {jam / n:>11.0f} {thr / n:>12.0f} {ovr / n:>12.0f}")
+    if memories and map_name == "iasi" and seconds >= 120.0:
+        merged = merge_memories(memories)
+        save_memory(merged)
+        print(
+            f"\nlearned ({merged.get('episodes', 0)} episodes): "
+            f"{dec} decisive, {wst} wasted, {mis} missed extensions judged this run."
+        )
 
 
 def apply_start_options(sim: Simulation, traffic: float | None, rush: str | None) -> None:
@@ -218,17 +245,40 @@ def main() -> None:
         "Bd. Independenței, Palas, Podu Roș, Tudor Vladimirescu)",
     )
     ap.add_argument("--compare", action="store_true", help="headless fixed vs adaptive comparison table")
+    ap.add_argument(
+        "--train",
+        type=int,
+        nargs="?",
+        const=3,
+        default=None,
+        metavar="EPISODES",
+        help="run multi-episode reinforcement learning and update data/learned_policy.json",
+    )
     ap.add_argument("--seconds", type=float, default=600.0, help="duration for --compare / --screenshot")
     ap.add_argument("--seeds", type=int, default=4, help="number of seeds for --compare")
     ap.add_argument("--screenshot", metavar="FILE", help="render one frame to FILE after --seconds and exit")
     args = ap.parse_args()
 
-    if args.compare:
-        compare(args.seconds, args.seeds, args.map, demand=args.demand, incident_at=args.incident_at)
-        return
-    cfg = Config(seed=args.seed) if args.demand is None else Config(seed=args.seed, gate_demand=args.demand)
     if args.traffic is not None and not 0 <= args.traffic <= 1000:
         ap.error("--traffic must be between 0 and 1000")
+    if args.train is not None:
+        train_policy(episodes=max(1, args.train), seconds=args.seconds, map_name=args.map)
+        return
+    if args.compare:
+        try:
+            compare(
+                args.seconds,
+                args.seeds,
+                args.map,
+                demand=args.demand,
+                incident_at=args.incident_at,
+                traffic=args.traffic,
+                rush=args.rush,
+            )
+        except ValueError as err:
+            ap.error(str(err))
+        return
+    cfg = Config(seed=args.seed) if args.demand is None else Config(seed=args.seed, gate_demand=args.demand)
     sim = Simulation(cfg, adaptive=not args.fixed, incident_at=args.incident_at, map_name=args.map)
     try:
         apply_start_options(sim, args.traffic, args.rush)

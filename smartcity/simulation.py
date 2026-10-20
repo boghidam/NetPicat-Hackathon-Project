@@ -11,6 +11,7 @@ from .controller import IntersectionController, NetworkCoordinator
 from .data import build_city
 from .detection import DetectionLoops
 from .events import EventLog
+from .learning import JunctionLearner, load_memory
 from .mock_api import BusFleet, TelemetryBus
 from .network import RoadNetwork
 from .predictor import PostIntersectionPredictor
@@ -29,6 +30,7 @@ class Simulation:
         incident_at: float | None = None,
         net: RoadNetwork | None = None,
         map_name: str = "iasi",
+        memory: dict | None = None,
     ):
         self.cfg = cfg = cfg or Config()
         rng = random.Random(cfg.seed)
@@ -51,6 +53,9 @@ class Simulation:
             if n.signalised
         }
         self.coord.controllers = self.controllers
+        actual_map = "grid" if "synthetic" in self.net.source else map_name
+        mem = memory if memory is not None else load_memory(map_name=actual_map)
+        self.coord.learner = JunctionLearner(cfg, self.progress, self.coord.load, mem)
         # Consumers see only the API stream, exactly as a real deployment would.
         self.api.subscribe(self.estimator.on_telemetry)
         self.api.subscribe(self.predictor.on_telemetry)
@@ -217,6 +222,8 @@ class Simulation:
             "throughput": float(self.model.exited),
             "cars": float(self.model.n_cars),
             "car_speed": self.model.car_speed_ratio,
+            # mean car speed / limit over every car-second of the run (steadier than the 30 s EMA above)
+            "car_speed_avg": self.model.car_ratio_sum / self.model.car_ratio_n if self.model.car_ratio_n else 1.0,
             "queued_outside": float(self.model.queued_outside),
             "overrides": float(self.events.overrides),
         }

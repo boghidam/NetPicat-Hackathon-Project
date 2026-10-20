@@ -74,8 +74,21 @@ class Config:
     loop_windows: tuple[float, float, float] = (50.0, 150.0, 300.0)  # m before the stop line: virtual detection loops
     cycle_window: float = 300.0  # m: buses within this road distance of a stop line are checked each cycle
     cycle_low_progress: float = 0.3  # "low": less than this share of the free-flow distance per cycle
-    cycle_ext_max: float = 12.0  # s: the longest extension one cycle check can add (scaled by the shortfall)
+    cycle_ext_max: float = 7.0  # s: the longest extension one cycle check can add (scaled by the shortfall)
     min_cycle: float = 20.0  # s: shorter gaps between greens are not judged
+
+    # --- bus green hold (classic transit signal priority) -----------------------
+    # When a green is about to end and a moving bus on it would reach the stop line a few seconds later, the green
+    # is held just long enough for it to clear (never shortened).
+    hold_horizon: float = 9.0  # s: the longest hold for one arriving bus (0 switches holding off)
+    hold_margin: float = 1.0  # s added to the bus's arrival estimate
+    hold_min_speed: float = 3.5  # m/s assumed for a bus rolling up in a discharging queue
+    hold_window: float = 95.0  # m before the stop line that a bus must be within to be held for
+    hold_min_openness: float = 0.55  # hold only if the streets ahead are at least this open (0..1)
+
+    # --- online learning per junction (counterfactual odometer credit assignment) ---
+    learn_rate: float = 0.08  # step size of the per-junction trust update after each extension (0 = no learning)
+    learn_cost: float = 0.8  # weight of the seconds taken from the cross streets against a bus that got through
 
     # --- global optimisation --------------------------------------------
     rho_gate: float = 0.65  # downstream load above which releases are metered
@@ -83,7 +96,7 @@ class Config:
     hop2_weight: float = 0.95  # how much the second junction downstream counts against lengthening a green
     budget_window: float = 60.0  # s
     budget_per_junction: float = (
-        1.2  # extension seconds per signalised junction per window: the cap grows with the network
+        3.5  # extension seconds per signalised junction per window: the cap grows with the network
     )
     budget_min: float = 30.0  # s: the floor for a small network, where 1.2 s per signal would allow almost nothing
     budget_seconds: float | None = None  # an explicit network-wide cap that replaces the per-junction one
@@ -102,7 +115,7 @@ class Config:
     pred_decay_tau: float = 40.0  # s: how quickly a forecast's weight fades with ETA
     pred_horizon: float = 30.0  # s: a forecast for a bus due within this long can extend the green that is starting
     pred_density_min: float = 0.2  # predicted density that counts as predicted low progress
-    pred_ext: float = 6.0  # s of predictive green extension
+    pred_ext: float = 2.0  # s of predictive green extension
 
     # --- incident -------------------------------------------------------
     incident_duration: float = 150.0  # s a stalled vehicle blocks the lane

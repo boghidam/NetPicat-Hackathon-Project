@@ -29,6 +29,7 @@ from .config import Config
 from .congestion import CongestionEstimator
 from .detection import DetectionLoops
 from .events import EventLog
+from .learning import JunctionLearner
 from .mock_api import BusTelemetry
 from .network import RoadNetwork
 from .predictor import Forecast, PostIntersectionPredictor
@@ -79,6 +80,15 @@ class NetworkCoordinator:
         self._last_log: dict[tuple[str, int], float] = {}
         self._neighbours = {node.id: net.neighbours(node.id) for node in net.nodes}
         self._hop2 = self._second_hops()
+        self.learner: JunctionLearner | None = None  # set when a learned policy is loaded
+
+    def trust(self, node: int, kind: str) -> float:
+        """How much this junction's learned experience scales an extension of this kind (1 without learning)."""
+        return 1.0 if self.learner is None else self.learner.trust(node, kind)
+
+    def phase_bonus(self, node: int, phase_idx: int) -> float:
+        """Extra seconds of green learned for a bottleneck discharge phase (0 without learning)."""
+        return 0.0 if self.learner is None else self.learner.phase_bonus(node, phase_idx)
 
     def _second_hops(self) -> list[list[int]]:
         """For every approach, the edges two junctions on: walk the networkx graph out of the node each release
@@ -301,11 +311,14 @@ class IntersectionController:
         if self.phase == "YELLOW":
             if self.elapsed >= self.cfg.yellow:
                 self.phase, self.elapsed = "ALLRED", 0.0
+                if self.coord.learner is not None:  # the green and its yellow are over: judge what was decided
+                    self.coord.learner.close(self, now)
         elif self.phase == "ALLRED":
             if self.elapsed >= self.cfg.all_red:
                 self._start_green(now)
         elif self.elapsed >= self.planned:  # a green only ever ends when its (possibly extended) time is up
-            self.phase, self.elapsed = "YELLOW", 0.0
+            if not (self.coord.adaptive and self.cfg.hold_horizon > 0.0 and self._hold_for_bus(now)):
+                self.phase, self.elapsed = "YELLOW", 0.0
 
     def _start_green(self, now: float) -> None:
         self.idx = (self.idx + 1) % len(self.groups)
@@ -314,6 +327,10 @@ class IntersectionController:
         previous = self._last_green.get(self.idx)
         self._last_green[self.idx] = now
         if self.coord.adaptive:
+            bonus = self.coord.phase_bonus(self.node, self.idx)
+            if bonus >= 1.0:
+                openness = max(self.coord.downstream_openness(a) for a in self.current)
+                self.planned = min(self.cfg.max_green, self.planned + bonus * openness)
             self._review_buses(now, None if previous is None else now - previous)
 
     # -- the per-cycle bus check ---------------------------------------------------
@@ -325,13 +342,19 @@ class IntersectionController:
             if ev is not None:
                 want = cfg.cycle_ext_max * (1.0 - ev.share / cfg.cycle_low_progress)
                 want *= coord.downstream_openness(ev.approach)  # no point extending into a jammed street
-                self._extend(
+                want *= coord.trust(self.node, "LOCAL_EXTEND")  # what this junction has learned about extending
+                deadline = now + self.planned  # when this green would have ended without the extension
+                granted = self._extend(
                     now,
                     want,
                     "LOCAL_EXTEND",
                     f"bus {ev.bus.bus_id} L{ev.bus.line} covered {ev.travelled:.0f} m in the last {cycle:.0f} s cycle "
                     f"({ev.share:.0%} of free flow)",
                 )
+                if granted > 0.0 and coord.learner is not None:
+                    dist = coord.loops.distance_to(ev.bus, ev.approach)
+                    if dist is not None:
+                        coord.learner.open(self, "LOCAL_EXTEND", ev.bus.bus_id, dist, granted, deadline, now)
         # Feed-forward: a bus due soon that is forecast to make low progress.
         for f in coord.forecasts_for_group(group, now):
             if f.id in self._used_forecasts or f.predicted_density < cfg.pred_density_min or f.confidence < 0.3:
@@ -347,14 +370,51 @@ class IntersectionController:
                 )
                 break
 
-    def _extend(self, now: float, seconds: float, kind: str, detail: str) -> None:
+    # -- the end-of-green bus hold ----------------------------------------------------------
+    def _hold_for_bus(self, now: float) -> bool:
+        """The green is up: hold it a few seconds if a moving bus on it would reach the stop line just too late.
+
+        Classic transit signal priority. Every bus heading for this phase within `hold_window` metres is given
+        an arrival estimate from its own telemetry (distance / speed, with a floor for a bus rolling up in a
+        queue that is discharging); the green is held for the latest one that can still make it within the
+        hold allowed here, which lets every nearer bus through too. Holds lengthen a green, never shorten one,
+        and draw on the same network budget as every other extension.
+        """
+        cfg, coord = self.cfg, self.coord
+        limit = cfg.hold_horizon * coord.trust(self.node, "BUS_HOLD")
+        chosen: tuple[float, BusTelemetry, int, float] | None = None
+        for tel, approach, dist in coord.loops.approaching(self.current, cfg.hold_window):
+            if dist <= 0.5:
+                continue  # already at or past the line
+            need = dist / max(tel.speed, cfg.hold_min_speed) + cfg.hold_margin
+            if need > limit or coord.downstream_openness(approach) < cfg.hold_min_openness:
+                continue
+            if chosen is None or need > chosen[0]:
+                chosen = (need, tel, approach, dist)
+        if chosen is None:
+            return False
+        need, tel, _approach, dist = chosen
+        granted = self._extend(
+            now,
+            need,
+            "BUS_HOLD",
+            f"bus {tel.bus_id} L{tel.line} {dist:.0f} m from the line at {tel.speed * 3.6:.0f} km/h",
+        )
+        if granted > 0.0 and coord.learner is not None:
+            coord.learner.open(self, "BUS_HOLD", tel.bus_id, dist, granted, now, now)
+        return granted > 0.0
+
+    def _extend(self, now: float, seconds: float, kind: str, detail: str) -> float:
+        """Lengthen the current green by up to `seconds` (within max green and the network budget); returns the
+        seconds actually granted."""
         room = self.cfg.max_green - self.planned
         want = min(seconds, room)
         if want < 1.0:
-            return
+            return 0.0
         granted = self.coord.request_extension(self.node, want, now)
         if granted <= 0.0:
-            return
+            return 0.0
         self.planned += granted
         self.extended_by += granted
         self.events.add(now, kind, f"{self.coord.label_group(self.current)} +{granted:.1f}s ({detail})", node=self.node)
+        return granted

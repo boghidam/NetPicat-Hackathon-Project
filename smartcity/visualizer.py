@@ -48,7 +48,7 @@ SIGNAL = {
 CAR = (147, 197, 253)  # Sky blue metallic
 CAR_OUTLINE = (15, 23, 42)  # Dark slate outline
 ROAD_WIDTH_M = {"primary": 12.0, "secondary": 10.0, "tertiary": 8.0}
-RING_KINDS = {"LOCAL_EXTEND", "PREDICTIVE_EXTEND", "THROTTLE"}
+RING_KINDS = {"BUS_HOLD", "LOCAL_EXTEND", "PREDICTIVE_EXTEND", "THROTTLE"}
 RUSH = (255, 122, 40)  # rush-hour orange: the key point under pressure
 
 

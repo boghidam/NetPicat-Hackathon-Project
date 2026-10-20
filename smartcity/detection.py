@@ -143,6 +143,28 @@ class DetectionLoops:
                     break
         return found
 
+    def approaching(self, approaches: list[int], window: float) -> list[tuple[BusTelemetry, int, float]]:
+        """Like `buses_near`, with the road distance each bus still has to cover to the stop line.
+
+        Returns (telemetry, approach, metres to the stop line), nearest approach first for each bus.
+        """
+        wanted = set(approaches)
+        found: list[tuple[BusTelemetry, int, float]] = []
+        for tel in self.latest.values():
+            for target, base in self.feeds[tel.segment_id]:
+                dist = tel.dist_to_next_node + base
+                if target in wanted and dist <= window and self._heads_for(tel, target):
+                    found.append((tel, target, dist))
+                    break
+        return found
+
+    def distance_to(self, tel: BusTelemetry, approach: int) -> float | None:
+        """Road distance from a bus to the stop line of an approach it feeds, or None if it does not feed it."""
+        for target, base in self.feeds[tel.segment_id]:
+            if target == approach:
+                return tel.dist_to_next_node + base
+        return None
+
     def _heads_for(self, tel: BusTelemetry, target: int) -> bool:
         if tel.segment_id == target:
             return True

@@ -62,6 +62,8 @@ class TrafficModel:
         self.exited = 0
         self.dropped = 0
         self.car_speed_ratio = 1.0  # EMA of car speed / speed limit
+        self.car_ratio_sum = 0.0  # car speed / speed limit, summed over every car on every tick
+        self.car_ratio_n = 0  # car-ticks in that sum: their ratio is the mean car speed over the whole run
         self._ids = 0
         self._release_factor: Callable[[int], float] = lambda s: 1.0
         self._signal_state: Callable[[int], str] = lambda s: "G"
@@ -268,6 +270,8 @@ class TrafficModel:
 
         if ratio_n:
             self.car_speed_ratio += (ratio_sum / ratio_n - self.car_speed_ratio) * dt / 30.0
+            self.car_ratio_sum += ratio_sum
+            self.car_ratio_n += ratio_n
         for seg, v in crossings:
             self._cross(seg, v)
 

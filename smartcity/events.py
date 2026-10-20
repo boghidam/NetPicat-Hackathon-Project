@@ -8,6 +8,7 @@ from dataclasses import dataclass
 # Kinds that mean "the algorithm overrode the standard fixed timer".
 OVERRIDE_KINDS = frozenset(
     {
+        "BUS_HOLD",
         "LOCAL_EXTEND",
         "PREDICTIVE_EXTEND",
         "THROTTLE",
