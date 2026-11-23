@@ -11,7 +11,7 @@ Opposite streets share a light (N+S green together, then E+W; at a T-junction th
 ```bash
 python3.14 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-python -m smartcity.main --incident-at 60     # interactive window
+python -m smartcity.main 60     # interactive window
 ```
 
 | key / mouse | action |
