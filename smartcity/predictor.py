@@ -14,6 +14,7 @@ from __future__ import annotations
 import itertools
 from collections import deque
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -257,3 +258,30 @@ class PostIntersectionPredictor:
         reg = self.cfg.pred_ridge_lambda * np.eye(self.FEATURES)
         reg[0, 0] = 0.0  # do not shrink the intercept
         self._weights = np.linalg.solve(X.T @ X + reg, X.T @ y)
+
+    # -- persistence ------------------------------------------------------
+    def export_state(self) -> dict[str, Any]:
+        """Serialize predictor state for JSON persistence (converting NumPy weights with `.tolist()`)."""
+        return {
+            "weights": self._weights.tolist() if self._weights is not None else None,
+            "trained_total": int(self._trained_total),
+            "mae_ratio": round(float(self.mae_ratio), 6),
+            "mae_eta": round(float(self.mae_eta), 6),
+        }
+
+    def load_state(self, state: dict[str, Any] | None) -> None:
+        """Restore predictor state from a JSON slot dictionary, reconstructing `np.ndarray` weights."""
+        if not state:
+            return
+        raw_weights = state.get("weights")
+        if raw_weights is None:
+            self._weights = None
+        elif isinstance(raw_weights, (list, tuple, np.ndarray)) and len(raw_weights) == self.FEATURES:
+            self._weights = np.array(raw_weights, dtype=float)
+        if "trained_total" in state:
+            self._trained_total = int(state["trained_total"])
+        if "mae_ratio" in state:
+            self.mae_ratio = float(state["mae_ratio"])
+            self.mae_speed = self.mae_ratio * 13.0
+        if "mae_eta" in state:
+            self.mae_eta = float(state["mae_eta"])

@@ -14,7 +14,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from .config import Config
+from .config import IASI_LINE_BUSES, Config
 from .network import RoadNetwork
 from .traffic_model import TrafficModel, Vehicle
 
@@ -76,20 +76,32 @@ class BusFleet:
             total = sum(lengths)
             starts = [sum(lengths[:i]) for i in range(len(lengths))]
             self._cum[line.ref] = (starts, total)
-            count = self.base_count(line.backbone, total)
+            count = self.base_count(line.backbone, total, ref=line.ref)
             self._base[line.ref] = count
             for k in range(count):
                 # Staggered departures: the buses of one line start evenly spaced around its loop (equal headways)
                 # with a little jitter, so none ever starts on top of another (or on a bus of a crossing line).
                 self._place(line.ref, (k / count) * total + rng.uniform(0, 40))
 
-    def base_count(self, backbone: bool, loop_length: float) -> int:
-        """Buses on a line at 100% traffic: 4 on a standard line, 6 to 8 on a backbone line (more on longer ones)."""
+    def base_count(self, backbone: bool, loop_length: float, ref: str = "") -> int:
+        """Realistic weekday-peak buses per line on Iași (`IASI_LINE_BUSES`), or synthetic grid rule."""
+        if ref in IASI_LINE_BUSES:
+            return IASI_LINE_BUSES[ref]
+        if ref.lower() in {k.lower(): v for k, v in IASI_LINE_BUSES.items()}:
+            return {k.lower(): v for k, v in IASI_LINE_BUSES.items()}[ref.lower()]
         cfg = self.cfg
         if not backbone:
             return cfg.buses_per_line
         wanted = round(loop_length / cfg.backbone_headway_m)
         return max(cfg.backbone_buses_min, min(cfg.backbone_buses_max, wanted))
+
+    def override_counts(self, counts: dict[str, int], percent: float = 100.0) -> None:
+        """Update per-line baseline counts (e.g. synced live from Tranzy API) and rebalance the fleet."""
+        lookup = {k.lower(): int(v) for k, v in counts.items() if int(v) >= 0}
+        for ref in list(self._base):
+            if ref.lower() in lookup:
+                self._base[ref] = max(0, min(25, lookup[ref.lower()]))
+        self.set_percent(percent)
 
     @property
     def buses(self) -> list[Vehicle]:
@@ -113,7 +125,9 @@ class BusFleet:
         route = self.net.route_by_ref[ref]
         for nudge in self._NUDGES:
             leg, pos = self._locate(ref, offset + nudge)
-            if self.world.try_place_bus(f"B{self._next_id:02d}", ref, route.edges, leg, pos):
+            if self.world.try_place_bus(
+                f"B{self._next_id:02d}", ref, route.edges, leg, pos, turnaround_leg=route.turnaround_leg
+            ):
                 self._next_id += 1
                 return True
         return False
@@ -162,9 +176,11 @@ class BusFleet:
                     break  # no room anywhere on the line right now
 
     def emit(self, now: float) -> list[BusTelemetry]:
-        """Publish one telemetry record per bus (a high-rate AVL feed)."""
+        """Publish one telemetry record per active driving bus (resting terminus buses do not trigger traffic sensors)."""
         out: list[BusTelemetry] = []
         for b in self.world.buses:
+            if b.status != "DRIVING":
+                continue
             seg = self.net.segments[b.seg]
             x, y, _, _ = self.net.position(seg.id, b.pos)
             rec = BusTelemetry(

@@ -8,3 +8,5 @@ __pycache__/
 screenshots/
 data/raw/
 cache/
+
+data/local_credentials.json

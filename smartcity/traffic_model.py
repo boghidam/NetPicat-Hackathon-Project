@@ -46,6 +46,11 @@ class Vehicle:
     delay: float = 0.0  # seconds beyond the free-flow schedule
     elapsed: float = 0.0
     laps: int = 0
+    status: str = "DRIVING"  # "DRIVING" | "LAYOVER" | "DRIVER_BREAK"
+    rest_remaining: float = 0.0  # s remaining at terminus bay
+    stops_since_break: int = 0
+    next_break_at: int = 4
+    turnaround_leg: int = 0
 
 
 class TrafficModel:
@@ -53,6 +58,8 @@ class TrafficModel:
         self.net, self.cfg, self.rng = net, cfg, rng
         self.lanes: list[list[Vehicle]] = [[] for _ in net.segments]  # front vehicle first
         self.buses: list[Vehicle] = []
+        self.resting_buses: list[Vehicle] = []  # buses parked in terminal bays (layover / driver break)
+        self.on_bus_rest: list[Callable[[str], None]] = []  # notified when a bus parks at a terminus
         self.incidents: dict[int, tuple[Vehicle, float]] = {}  # segment -> (blocker, expiry)
         self.backlog = {g: 0 for g in net.gates}  # cars waiting outside a gate
         self.demand_scale = 1.0  # runtime traffic amount: 1.0 is normal (100%), 0 spawns nothing
@@ -148,7 +155,9 @@ class TrafficModel:
                 return into + out
         return net.random_trip(self.rng)
 
-    def add_bus(self, bus_id: str, line: str, route: list[int], leg: int, pos: float) -> Vehicle:
+    def add_bus(
+        self, bus_id: str, line: str, route: list[int], leg: int, pos: float, turnaround_leg: int = 0
+    ) -> Vehicle:
         """Place a bus on its route, sliding it back if the spot is taken."""
         seg = self.net.segments[route[leg]]
         pos = min(pos, max(0.0, seg.stop_pos - 6.0))
@@ -157,6 +166,8 @@ class TrafficModel:
         bus = Vehicle(
             bus_id, "bus", seg.id, max(pos, 0.0), 0.5 * seg.speed_limit, self.cfg.bus_length, 1.0,
             route=route, cyclic=True, leg=leg, line=line,
+            next_break_at=self.rng.randint(self.cfg.bus_break_every_min, self.cfg.bus_break_every_max),
+            turnaround_leg=turnaround_leg,
         )  # fmt: skip
         bus.next_seg = self._next_on_route(bus)
         self._insert(self.lanes[seg.id], bus)
@@ -222,6 +233,7 @@ class TrafficModel:
         for seg_id, (_, expiry) in list(self.incidents.items()):
             if now >= expiry:
                 self.clear_incident(seg_id)
+        self._step_resting_buses(dt)
         self._spawn(dt)
 
         cfg = self.cfg
@@ -312,6 +324,40 @@ class TrafficModel:
             self.exited += 1
             return
         self.in_box.get(tgt, {}).pop(v.id, None)
+        finished_leg = v.leg
+        v.leg += 1
+        wrapped = False
+        if v.cyclic and v.route is not None and v.leg >= len(v.route):
+            v.leg = 0
+            v.laps += 1
+            wrapped = True
+        v.next_seg = self._next_on_route(v)
+
+        # Realistic terminal layover (5-15 min) & periodic driver break (15-30 min) instead of despawning
+        if (
+            v.kind == "bus"
+            and v.cyclic
+            and self.cfg.bus_layovers
+            and "synthetic" not in self.net.source
+            and (wrapped or (v.turnaround_leg > 0 and finished_leg == v.turnaround_leg))
+        ):
+            v.seg = tgt
+            v.pos = 0.0
+            v.v = 0.0
+            v.stops_since_break += 1
+            if v.stops_since_break >= v.next_break_at:
+                v.status = "DRIVER_BREAK"
+                v.rest_remaining = self.rng.uniform(self.cfg.bus_break_min, self.cfg.bus_break_max)
+                v.stops_since_break = 0
+                v.next_break_at = self.rng.randint(self.cfg.bus_break_every_min, self.cfg.bus_break_every_max)
+            else:
+                v.status = "LAYOVER"
+                v.rest_remaining = self.rng.uniform(self.cfg.bus_layover_min, self.cfg.bus_layover_max)
+            self.resting_buses.append(v)
+            for cb in self.on_bus_rest:
+                cb(v.id)
+            return
+
         v.seg, v.pos = tgt, max(0.0, v.pos - seg.length)
         lane = self.lanes[tgt]
         if lane:  # two streams may merge into this edge at once: the later one falls in behind the earlier
@@ -320,11 +366,25 @@ class TrafficModel:
             if v.pos > room:
                 v.pos, v.v = room, min(v.v, ahead.v)  # may be a little before the centre: still in the junction
         lane.append(v)
-        v.leg += 1
-        if v.cyclic and v.route is not None and v.leg >= len(v.route):
-            v.leg = 0
-            v.laps += 1
-        v.next_seg = self._next_on_route(v)
+
+    def _step_resting_buses(self, dt: float) -> None:
+        """Count down terminal layovers/driver breaks and dispatch buses cleanly back onto their route."""
+        if not self.resting_buses:
+            return
+        still_resting: list[Vehicle] = []
+        for v in self.resting_buses:
+            v.rest_remaining = max(0.0, v.rest_remaining - dt)
+            if v.rest_remaining <= 0.0:
+                lane = self.lanes[v.seg]
+                if not lane or lane[-1].pos - lane[-1].length >= v.length + self.cfg.min_gap + 1.0:
+                    v.status = "DRIVING"
+                    v.rest_remaining = 0.0
+                    v.pos = 0.0
+                    v.v = 0.5 * self.net.segments[v.seg].speed_limit
+                    lane.append(v)
+                    continue
+            still_resting.append(v)
+        self.resting_buses = still_resting
 
     def _spawn(self, dt: float) -> None:
         cfg = self.cfg
@@ -391,10 +451,14 @@ class TrafficModel:
             lane.remove(v)
         if v.next_seg is not None:
             self.in_box.get(v.next_seg, {}).pop(v.id, None)
+        if v in self.resting_buses:
+            self.resting_buses.remove(v)
         if v in self.buses:
             self.buses.remove(v)
 
-    def try_place_bus(self, bus_id: str, line: str, route: list[int], leg: int, pos: float) -> Vehicle | None:
+    def try_place_bus(
+        self, bus_id: str, line: str, route: list[int], leg: int, pos: float, turnaround_leg: int = 0
+    ) -> Vehicle | None:
         """Add a bus at a spot that is free right now; None if the spot is taken."""
         seg = self.net.segments[route[leg]]
         pos = min(pos, max(0.0, seg.stop_pos - 6.0))
@@ -403,6 +467,8 @@ class TrafficModel:
         bus = Vehicle(
             bus_id, "bus", seg.id, pos, 0.5 * seg.speed_limit, self.cfg.bus_length, 1.0,
             route=route, cyclic=True, leg=leg, line=line,
+            next_break_at=self.rng.randint(self.cfg.bus_break_every_min, self.cfg.bus_break_every_max),
+            turnaround_leg=turnaround_leg,
         )  # fmt: skip
         bus.next_seg = self._next_on_route(bus)
         self._insert(self.lanes[seg.id], bus)

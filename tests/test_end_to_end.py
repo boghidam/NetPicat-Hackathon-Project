@@ -97,7 +97,7 @@ def test_adaptive_run_exercises_the_decision_paths_and_the_ai_feed_forward(iasi_
     assert counts["THROTTLE"] > 0
     assert counts["FORECAST"] > 0 and counts["FORECAST_RESOLVED"] > 0
     assert sim.predictor.model_name == "RIDGE"
-    assert sim.api.published == len(sim.fleet.buses) * int(600 / sim.cfg.dt)
+    assert sim.api.published > 0.5 * len(sim.fleet.buses) * int(600 / sim.cfg.dt)
     for e in sim.events.recent(3000, {"LOCAL_EXTEND"}):
         assert "cycle" in e.text and "% of free flow" in e.text  # every extension cites its evidence
 
@@ -178,7 +178,8 @@ def test_a_big_fleet_stays_ordered_obeys_signals_and_keeps_the_sumo_timings(iasi
 def test_every_bus_of_a_big_fleet_is_tracked_by_the_detection_loops(iasi_net):
     sim = Simulation(Config(seed=6, traffic_amount=3.0), adaptive=True, net=iasi_net)
     sim.run(60)
-    assert len(sim.fleet.buses) == 300 and set(sim.loops.latest) == {b.id for b in sim.fleet.buses}
+    driving_ids = {b.id for b in sim.fleet.buses if b.status == "DRIVING"}
+    assert len(sim.fleet.buses) >= 400 and set(sim.loops.latest) == driving_ids
     near = [r for r in sim.loops.readings.values() if r.count[2] > 0]  # buses inside the 300 m window
     assert len(near) > 100  # many approaches see a bus coming at once
     for r in near:

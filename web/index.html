@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Noodle Traffic Control — Iași</title>
+  <link rel="icon" type="image/png" href="assets/noodle-logo.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- TOP NAVIGATION BAR (Bottle Green) -->
+  <header class="topbar">
+    <div class="brand">
+      <img src="assets/noodle-logo.png" alt="Noodle Logo" class="brand-logo" />
+      <span class="brand-title"><strong>Noodle</strong> Traffic Control</span>
+    </div>
+
+    <!-- Center Mode Switcher: Aether (Simulation) | Terra (Real) -->
+    <div class="mode-switch" role="tablist" aria-label="Operating mode">
+      <button id="btnModeAether" class="mode-pill active" role="tab" aria-selected="true">
+        Aether (Simulation)
+      </button>
+      <button id="btnModeTerra" class="mode-pill" role="tab" aria-selected="false">
+        Terra (Real)
+      </button>
+    </div>
+
+    <!-- Right Controls: Slot Dropdown, + New, API Key, Collapse Drawer -->
+    <div class="topbar-actions">
+      <div class="slot-wrap">
+        <button id="btnSlotMenu" class="top-btn slot-btn" title="Select or manage ML save slots">
+          <span id="slotBtnLabel">Slot: default (15 ep)</span>
+          <svg class="chev" viewBox="0 0 16 16" fill="none"><path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <div id="slotDropdown" class="popover hidden">
+          <div class="popover-head">
+            <span>ML Save Slots</span>
+            <span id="runtimeBadge" class="runtime-tag">Python</span>
+          </div>
+          <div id="slotList" class="slot-list"></div>
+          <div class="popover-foot">
+            <button id="btnResetActiveSlot" class="pop-action danger-soft">Reset Active Slot</button>
+          </div>
+        </div>
+      </div>
+
+      <button id="btnNewSlot" class="top-btn" title="Create a new clean ML slot">+ New</button>
+
+      <button id="btnApiKey" class="top-btn api-btn" title="Configure Tranzy / CTP API Key">
+        <span>API Key</span>
+        <span id="apiDot" class="status-dot"></span>
+      </button>
+
+      <button id="btnToggleDrawer" class="top-btn icon-btn" title="Collapse or expand executive panel" aria-label="Toggle side panel">
+        <svg viewBox="0 0 20 20" fill="none"><rect x="3" y="4" width="14" height="12" rx="2.5" stroke="currentColor" stroke-width="1.6"/><path d="M12.5 4v12" stroke="currentColor" stroke-width="1.6"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- FULL-BLEED MAP CANVAS + FLOATING COLLAPSIBLE EXECUTIVE DRAWER -->
+  <main class="workspace">
+    <div id="mapWrap" class="map-wrap">
+      <canvas id="cityCanvas"></canvas>
+
+      <!-- Hover tooltip for buses & landmarks -->
+      <div id="mapTooltip" class="map-tooltip hidden"></div>
+
+      <!-- Subtle mode / simulation clock chip (top-left of map) -->
+      <div class="map-status-chip">
+        <span id="livePulseDot" class="pulse-dot"></span>
+        <span id="mapClockText">Aether · t = 0.0s · 51 CTP Lines</span>
+      </div>
+
+      <!-- Bottom-left Floating Map Toolbar & Legend -->
+      <div class="map-controls">
+        <div class="zoom-stack">
+          <button id="btnZoomIn" class="map-btn" title="Zoom in">+</button>
+          <div class="zoom-div"></div>
+          <button id="btnZoomOut" class="map-btn" title="Zoom out">&minus;</button>
+        </div>
+        <div class="map-pill-bar">
+          <button id="btnFitMap" class="map-icon-btn" title="Fit Iași network">
+            <svg viewBox="0 0 20 20" fill="none"><path d="M4 8V4h4M16 8V4h-4M4 12v4h4M16 12v4h-4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <button id="btnHeat" class="map-icon-btn" title="Toggle bus-inferred congestion heat layer">
+            <svg viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="6" stroke="currentColor" stroke-width="1.6"/><circle cx="10" cy="10" r="2.5" fill="currentColor"/></svg>
+          </button>
+          <button id="btnRoutes" class="map-icon-btn active" title="Show/hide transit corridors">
+            <svg viewBox="0 0 20 20" fill="none"><path d="M4 15L9 5l4 7 3-4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <div class="bar-sep"></div>
+          <div class="legend-items">
+            <span class="leg"><i class="leg-bus"></i>Bus</span>
+            <span class="leg"><i class="leg-rest"></i>Layover</span>
+            <span class="leg"><i class="leg-hold"></i>Signal Hold</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- COLLAPSIBLE FLOATING RIGHT DRAWER (Rounded Left Corners) -->
+    <aside id="drawer" class="drawer" aria-label="Executive Impact Panel">
+      <button id="btnDrawerTab" class="drawer-tab" title="Collapse / expand panel" aria-label="Collapse panel">
+        <svg id="drawerChevron" viewBox="0 0 16 16" fill="none"><path d="M6.5 4l4 4-4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+
+      <div class="drawer-inner">
+        <div class="drawer-head">
+          <h2>Executive Impact</h2>
+          <span id="statusBadge" class="status-pill adaptive">
+            <i class="dot"></i>
+            <span id="statusBadgeText">ADAPTIVE AI ACTIVE</span>
+          </span>
+        </div>
+
+        <!-- Hero Metric Card -->
+        <section class="card hero-card">
+          <div class="card-label" id="heroLabel">Bus Delay Reduced</div>
+          <div class="hero-value" id="kpiDelayReduction">-21.4%</div>
+          <div class="card-sub" id="kpiDelaySub">16.2% vs 20.6% Fixed Baseline</div>
+        </section>
+
+        <!-- Secondary KPI Row -->
+        <section class="kpi-pair">
+          <div class="card kpi-card">
+            <div class="card-label">Predicted Flow</div>
+            <div class="kpi-value" id="kpiPredictedFlow">88%</div>
+            <span class="lime-pill">From bus telemetry</span>
+          </div>
+          <div class="card kpi-card">
+            <div class="card-label">AI Precision</div>
+            <div class="kpi-value" id="kpiPrecision">96.4%</div>
+            <div class="card-sub" id="kpiHoldsSub">438 decisive holds</div>
+          </div>
+        </section>
+
+        <!-- Municipal Value Comparison Card -->
+        <section class="card value-card">
+          <div class="card-label">Municipal Value</div>
+          <div class="value-grid">
+            <div class="bar-chart">
+              <div class="bar-col">
+                <div class="bar-track"><div id="barAdaptive" class="bar-fill adaptive" style="height: 82%"></div></div>
+                <span>Adaptive AI</span>
+              </div>
+              <div class="bar-col">
+                <div class="bar-track"><div id="barFixed" class="bar-fill fixed" style="height: 54%"></div></div>
+                <span>Fixed</span>
+              </div>
+            </div>
+            <div class="value-metrics">
+              <div class="val-item">
+                <span class="val-lbl">Passenger Time Saved</span>
+                <strong id="kpiPaxHours">~142 hrs/day</strong>
+              </div>
+              <div class="val-item">
+                <span class="val-lbl">Est. Idle CO₂ Cut</span>
+                <strong id="kpiCo2">-18%</strong>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Fleet Status Strip (51 Lines + Layovers/Breaks) -->
+        <section class="card fleet-card">
+          <div class="fleet-row">
+            <span class="fleet-title" id="fleetTitle">CTP Iași Fleet (51 Lines)</span>
+            <span class="fleet-total" id="fleetTotal">158 buses</span>
+          </div>
+          <div class="fleet-pills">
+            <span class="fpill driving"><i class="d"></i><b id="cntDriving">158</b> Driving</span>
+            <span class="fpill layover"><i class="d"></i><b id="cntLayover">0</b> Layover</span>
+            <span class="fpill break"><i class="d"></i><b id="cntBreak">0</b> Break</span>
+          </div>
+        </section>
+
+        <!-- AETHER QUICK CONTROLS -->
+        <section id="aetherControls" class="card controls-card">
+          <div class="card-label">Quick Controls</div>
+
+          <div class="seg-control">
+            <button id="btnCtrlAdaptive" class="seg-btn active">Adaptive AI</button>
+            <button id="btnCtrlFixed" class="seg-btn">Fixed Timers</button>
+          </div>
+
+          <div class="slider-row">
+            <span>Traffic Load:</span>
+            <input id="trafficSlider" type="range" min="0" max="500" step="10" value="100" />
+            <strong id="trafficVal">100%</strong>
+          </div>
+
+          <div class="select-wrap">
+            <select id="rushSelect" aria-label="Trigger Rush Hour">
+              <option value="">Trigger Rush Hour: Off</option>
+              <option value="Copou">Rush Hour: Copou</option>
+              <option value="Păcurari">Rush Hour: Păcurari</option>
+              <option value="Gara Iași">Rush Hour: Gara Iași</option>
+              <option value="Piața Unirii">Rush Hour: Piața Unirii</option>
+              <option value="Bd. Independenței">Rush Hour: Bd. Independenței</option>
+              <option value="Palas">Rush Hour: Palas</option>
+              <option value="Podu Roș">Rush Hour: Podu Roș</option>
+              <option value="Tudor Vladimirescu">Rush Hour: Tudor Vladimirescu</option>
+            </select>
+          </div>
+
+          <div class="mini-actions">
+            <button id="btnPlayPause" class="mini-btn" title="Pause / resume">Pause</button>
+            <button id="btnSpeed" class="mini-btn" title="Cycle simulation speed">1× Speed</button>
+            <button id="btnIncident" class="mini-btn warn" title="Stall a vehicle on busiest corridor">Incident</button>
+            <button id="btnResetSim" class="mini-btn" title="Reset simulation">Reset</button>
+          </div>
+        </section>
+
+        <!-- TERRA LIVE CONTROLS & AI ADVISORIES -->
+        <section id="terraControls" class="card controls-card hidden">
+          <div class="card-label">Terra Live Feed (Tranzy API)</div>
+          <div id="terraStatusBox" class="terra-status">
+            Configure your Tranzy API key to stream live CTP Iași vehicles.
+          </div>
+          <div class="mini-actions">
+            <button id="btnOpenApiModal2" class="mini-btn primary">Configure API Key</button>
+            <button id="btnSyncFleet" class="mini-btn" title="Copy live Tranzy route counts into Aether">Sync Fleet → Aether</button>
+          </div>
+          <div class="advisories-wrap">
+            <div class="adv-head">Live AI Signal Advisories</div>
+            <div id="advisoriesList" class="adv-list">
+              <div class="adv-empty">Waiting for real-time CTP bus telemetry…</div>
+            </div>
+          </div>
+          <div class="attribution">Data © Tranzy AI SRL &amp; Compania de Transport Public Iași SA</div>
+        </section>
+      </div>
+    </aside>
+  </main>
+
+  <!-- MODAL: NEW NAMED ML SLOT -->
+  <div id="newSlotModal" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3>Create New ML Slot</h3>
+        <button class="modal-close" data-close="newSlotModal">&times;</button>
+      </div>
+      <p class="modal-desc">
+        Start a fresh slot from clean default parameters without touching or deleting any existing trained slots.
+      </p>
+      <label class="field-label" for="inputNewSlotName">Slot Name</label>
+      <input id="inputNewSlotName" type="text" class="field-input" placeholder="e.g. rush_hour_exp or slot_2" autocomplete="off" />
+      <div id="newSlotError" class="field-err hidden"></div>
+      <div class="modal-foot">
+        <button class="btn-ghost" data-close="newSlotModal">Cancel</button>
+        <button id="btnConfirmNewSlot" class="btn-primary">Create &amp; Switch</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: TRANZY / CTP API KEY -->
+  <div id="apiKeyModal" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3>Terra (Real) — Tranzy API Connection</h3>
+        <button class="modal-close" data-close="apiKeyModal">&times;</button>
+      </div>
+      <p class="modal-desc">
+        Connect to real-time CTP Iași bus GPS telemetry via <strong>api.tranzy.ai</strong>. Your key is kept masked and stored locally (never shown in plain text).
+      </p>
+      <label class="field-label" for="inputApiKey">X-API-KEY</label>
+      <input id="inputApiKey" type="password" class="field-input" placeholder="Paste your Tranzy API key" autocomplete="off" />
+      <label class="field-label" for="inputAgencyId">X-Agency-Id (CTP Iași = 1)</label>
+      <input id="inputAgencyId" type="text" class="field-input" value="1" autocomplete="off" />
+      <div id="apiTestMsg" class="field-msg hidden"></div>
+      <div class="modal-foot">
+        <button class="btn-ghost" data-close="apiKeyModal">Close</button>
+        <button id="btnSaveApiKey" class="btn-primary">Test &amp; Connect</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="demo_config.js"></script>
+  <script src="standalone_sim.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

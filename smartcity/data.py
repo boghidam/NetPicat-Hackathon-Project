@@ -36,6 +36,8 @@ def load_iasi(data_dir: Path | None = None) -> tuple[GraphData, list[RouteData]]
             r["edges"],
             [(s["lat"], s["lon"]) for s in r["stops"]],
             backbone=r.get("backbone", False),
+            turnaround_leg=int(r.get("turnaround_leg", 0)),
+            metropolitan=bool(r.get("metropolitan", False)),
         )
         for r in routes["routes"]
     ]

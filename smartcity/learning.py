@@ -11,24 +11,28 @@ Two levels, both learning only from what the controller is allowed to see (bus t
   The difference nudges that junction's *trust* in that kind of extension up or down, so a junction where
   holds keep paying off holds more generously and one where they keep failing pulls back.
 
-* **Across runs, persistent** (`load_memory`, `save_memory`, `merge_memories`, `train_policy`). Each junction's
-  learned trust, decision counts, outcome tallies (`decisive`, `wasted`, `missed`), and bottleneck discharge
-  phase bonuses are persisted in `data/learned_policy.json`, so every comparison or training session continues
-  where the last one left off.
+* **Across runs, persistent** (`SlotManager` in `smartcity/slots.py`, `merge_memories`, `train_policy`). Each
+  junction's learned trust, decision counts, outcome tallies (`decisive`, `wasted`, `missed`), bottleneck
+  discharge phase bonuses, and predictor Ridge weights are persisted in versioned, crash-safe JSON slots under
+  `data/slots/<slot_name>.json`, so every session continues where the last one left off.
 """
 
 from __future__ import annotations
 
+import atexit
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+import numpy as np
 
 from .config import Config
 
 if TYPE_CHECKING:
     from .controller import IntersectionController
     from .progress import RouteProgress
+    from .slots import SlotManager
 
 POLICY_PATH = Path(__file__).resolve().parent.parent / "data" / "learned_policy.json"
 
@@ -60,7 +64,7 @@ DEFAULT_IASI_PHASES: dict[int, list[float]] = {
 
 
 def default_iasi_memory() -> dict:
-    """Initial learned policy for the Iași network."""
+    """Initial learned policy dictionary for the Iași network."""
     return {
         "map": "iasi",
         "episodes": 12,
@@ -77,9 +81,24 @@ def default_iasi_memory() -> dict:
 
 def load_memory(path: Path = POLICY_PATH, map_name: str = "iasi") -> dict | None:
     """Load the persisted learned memory for `map_name`, or None for networks without a policy."""
+    from .slots import DEFAULT_SLOT_NAME, SlotManager
+
+    if path == POLICY_PATH:
+        if map_name != "iasi":
+            mgr = SlotManager()
+            if not mgr.exists(DEFAULT_SLOT_NAME):
+                return None
+        slot = SlotManager().load_slot(DEFAULT_SLOT_NAME, map_name=map_name, fallback_to_default=True)
+        pol = slot.get("policy") or {}
+        if pol.get("map", map_name) == map_name:
+            return pol
+        return None
+
     if path.exists():
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data.get("policy"), dict):
+                data = data["policy"]
             if data.get("map", "iasi") == map_name:
                 return data
         except (OSError, ValueError):
@@ -90,9 +109,16 @@ def load_memory(path: Path = POLICY_PATH, map_name: str = "iasi") -> dict | None
 
 
 def save_memory(memory: dict, path: Path = POLICY_PATH) -> None:
-    """Persist the learned memory to disk."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(memory, indent=2) + "\n", encoding="utf-8")
+    """Atomically persist the learned memory to disk (syncing the default slot when writing `POLICY_PATH`)."""
+    from .slots import DEFAULT_SLOT_NAME, SlotManager, atomic_write_json
+
+    atomic_write_json(path, memory)
+    if path == POLICY_PATH:
+        mgr = SlotManager()
+        slot = mgr.load_slot(DEFAULT_SLOT_NAME, map_name=str(memory.get("map", "iasi")), fallback_to_default=True)
+        slot["policy"] = memory
+        slot["metadata"]["episodes"] = int(memory.get("episodes", slot["metadata"].get("episodes", 0)))
+        mgr.save_slot(DEFAULT_SLOT_NAME, slot)
 
 
 # -- per-junction online learning --------------------------------------------------------------------------------
@@ -112,7 +138,8 @@ class JunctionLearner:
 
     def __init__(self, cfg: Config, progress: RouteProgress, load: list[float], memory: dict | None = None):
         self.cfg, self.progress, self.load = cfg, progress, load
-        mem = memory or {}
+        raw = memory or {}
+        mem = raw["policy"] if isinstance(raw.get("policy"), dict) else raw
         self.map_name: str = str(mem.get("map", "grid"))
         self.episodes: int = int(mem.get("episodes", 0))
         raw_def = mem.get("default_trust") or {}
@@ -222,10 +249,11 @@ def merge_memories(memories: list[dict]) -> dict:
     """Average what several runs learned about each junction, weighting each run by how much it saw there."""
     if not memories:
         return {"trust": {}, "count": {}}
-    base = memories[0]
+    unwrapped = [m["policy"] if isinstance(m.get("policy"), dict) else m for m in memories]
+    base = unwrapped[0]
     trust: dict[str, dict[str, list[tuple[float, float]]]] = {}
     count: dict[str, int] = {}
-    for mem in memories:
+    for mem in unwrapped:
         for node, row in mem.get("trust", {}).items():
             w = float(mem.get("count", {}).get(node, 1)) or 1.0
             for kind, v in row.items():
@@ -242,12 +270,12 @@ def merge_memories(memories: list[dict]) -> dict:
     }
     if "map" in base:
         merged["map"] = base["map"]
-        merged["episodes"] = max(int(m.get("episodes", 0)) for m in memories)
+        merged["episodes"] = max(int(m.get("episodes", 0)) for m in unwrapped)
         merged["default_trust"] = dict(base.get("default_trust") or DEFAULT_TRUST)
         merged["phase_bonus"] = dict(base.get("phase_bonus") or {})
         merged["outcomes"] = {
             kind: {
-                o: max(int(((m.get("outcomes") or {}).get(kind) or {}).get(o, 0)) for m in memories)
+                o: max(int(((m.get("outcomes") or {}).get(kind) or {}).get(o, 0)) for m in unwrapped)
                 for o in ("decisive", "wasted", "missed")
             }
             for kind in LEARNED_KINDS
@@ -255,54 +283,117 @@ def merge_memories(memories: list[dict]) -> dict:
     return merged
 
 
+def merge_predictor_states(states: list[dict[str, Any]]) -> dict[str, Any]:
+    """Average Ridge regression weights and error statistics across parallel/multi-seed runs."""
+    if not states:
+        return {"weights": None, "trained_total": 0, "mae_ratio": 0.15, "mae_eta": 0.0}
+    valid_w = [np.asarray(s["weights"], dtype=float) for s in states if s.get("weights") is not None]
+    weights = np.mean(valid_w, axis=0).tolist() if valid_w else None
+    trained_total = max(int(s.get("trained_total", 0)) for s in states)
+    mae_ratio = round(sum(float(s.get("mae_ratio", 0.15)) for s in states) / len(states), 6)
+    mae_eta = round(sum(float(s.get("mae_eta", 0.0)) for s in states) / len(states), 6)
+    return {
+        "weights": weights,
+        "trained_total": trained_total,
+        "mae_ratio": mae_ratio,
+        "mae_eta": mae_eta,
+    }
+
+
 def train_policy(
     episodes: int = 3,
     seeds_per_ep: int = 2,
     seconds: float = 600.0,
     map_name: str = "iasi",
-    path: Path = POLICY_PATH,
+    path: Path | None = None,
+    slot_name: str = "default",
+    from_clean: bool = False,
+    reset_slot: bool = False,
+    manager: SlotManager | None = None,
 ) -> dict:
-    """Run multi-episode online reinforcement learning on training seeds and persist the updated policy."""
+    """Run multi-episode online reinforcement learning and atomically persist to the selected slot."""
     from .data import build_city
     from .simulation import Simulation
+    from .slots import SlotManager as _SlotManager
 
-    cfg = Config()
-    net = build_city(map_name, cfg)
-    mem = load_memory(path, map_name) or default_iasi_memory()
-    base_ep = int(mem.get("episodes", 0))
-    print(f"Training adaptive policy on {map_name} ({episodes} episode(s) x {seeds_per_ep} seeds x {seconds:.0f}s)...")
-    for ep in range(episodes):
-        ep_memories: list[dict] = []
-        f_bus = a_bus = f_car = a_car = 0.0
-        dec = wst = mis = 0
-        for k in range(seeds_per_ep):
-            seed = 101 + (base_ep + ep) * seeds_per_ep + k
-            sim_f = Simulation(Config(seed=seed), adaptive=False, incident_at=120.0, net=net)
-            sim_f.run(seconds)
-            mf = sim_f.metrics()
-            f_bus += mf["bus_delay_ratio"]
-            f_car += mf["car_speed"]
+    mgr = manager or _SlotManager()
+    if reset_slot:
+        slot_data = mgr.reset_slot(slot_name, map_name=map_name)
+    elif from_clean:
+        slot_data = mgr.clean_state(slot_name, map_name=map_name)
+    else:
+        slot_data = mgr.load_slot(slot_name, map_name=map_name, fallback_to_default=True)
 
-            sim_a = Simulation(Config(seed=seed), adaptive=True, incident_at=120.0, net=net, memory=mem)
-            sim_a.run(seconds)
-            ma = sim_a.metrics()
-            a_bus += ma["bus_delay_ratio"]
-            a_car += ma["car_speed"]
-            if sim_a.coord.learner is not None:
-                lrn = sim_a.coord.learner
-                ep_memories.append(lrn.memory())
-                for kind in LEARNED_KINDS:
-                    dec += lrn.outcomes[kind]["decisive"]
-                    wst += lrn.outcomes[kind]["wasted"]
-                    mis += lrn.outcomes[kind]["missed"]
-        if ep_memories:
-            mem = merge_memories(ep_memories)
-            # Accumulate outcome deltas across all seeds in the episode
-            save_memory(mem, path)
-        n = seeds_per_ep
+    dirty = False
+
+    def _flush_on_exit() -> None:
+        nonlocal dirty
+        if dirty:
+            mgr.save_slot(slot_name, slot_data)
+            dirty = False
+
+    atexit.register(_flush_on_exit)
+    try:
+        cfg = Config()
+        net = build_city(map_name, cfg)
+        base_ep = int(slot_data["metadata"].get("episodes", 0))
         print(
-            f"  ep {ep + 1}/{episodes}: bus lost {f_bus / n:.1%} -> {a_bus / n:.1%} "
-            f"| car speed {f_car / n:.1%} -> {a_car / n:.1%} "
-            f"| judged: {dec} decisive, {wst} wasted, {mis} missed"
+            f"Training slot '{mgr.sanitize_name(slot_name)}' on {map_name} "
+            f"({episodes} episode(s) x {seeds_per_ep} seeds x {seconds:.0f}s)..."
         )
-    return mem
+        for ep in range(episodes):
+            ep_memories: list[dict] = []
+            ep_preds: list[dict] = []
+            f_bus = a_bus = f_car = a_car = 0.0
+            dec = wst = mis = 0
+            for k in range(seeds_per_ep):
+                seed = 101 + (base_ep + ep) * seeds_per_ep + k
+                sim_f = Simulation(Config(seed=seed), adaptive=False, incident_at=120.0, net=net, map_name=map_name)
+                sim_f.run(seconds)
+                mf = sim_f.metrics()
+                f_bus += mf["bus_delay_ratio"]
+                f_car += mf["car_speed"]
+
+                sim_a = Simulation(
+                    Config(seed=seed),
+                    adaptive=True,
+                    incident_at=120.0,
+                    net=net,
+                    map_name=map_name,
+                    memory=slot_data,
+                )
+                sim_a.run(seconds)
+                ma = sim_a.metrics()
+                a_bus += ma["bus_delay_ratio"]
+                a_car += ma["car_speed"]
+                if sim_a.coord.learner is not None:
+                    lrn = sim_a.coord.learner
+                    ep_memories.append(lrn.memory())
+                    for kind in LEARNED_KINDS:
+                        dec += lrn.outcomes[kind]["decisive"]
+                        wst += lrn.outcomes[kind]["wasted"]
+                        mis += lrn.outcomes[kind]["missed"]
+                ep_preds.append(sim_a.predictor.export_state())
+            if ep_memories:
+                slot_data["policy"] = merge_memories(ep_memories)
+                slot_data["predictor"] = merge_predictor_states(ep_preds)
+                slot_data["metadata"]["episodes"] = int(slot_data["policy"].get("episodes", base_ep + ep + 1))
+                slot_data["metadata"]["sim_seconds_trained"] = round(
+                    float(slot_data["metadata"].get("sim_seconds_trained", 0.0)) + seeds_per_ep * seconds,
+                    2,
+                )
+                dirty = True
+                mgr.save_slot(slot_name, slot_data)
+                if path is not None:
+                    save_memory(slot_data["policy"], path)
+                dirty = False
+            n = seeds_per_ep
+            print(
+                f"  ep {ep + 1}/{episodes}: bus lost {f_bus / n:.1%} -> {a_bus / n:.1%} "
+                f"| car speed {f_car / n:.1%} -> {a_car / n:.1%} "
+                f"| judged: {dec} decisive, {wst} wasted, {mis} missed"
+            )
+    finally:
+        _flush_on_exit()
+        atexit.unregister(_flush_on_exit)
+    return slot_data

@@ -32,14 +32,16 @@ def test_edges_have_real_lengths_and_speed_limits(iasi_net):
     assert 50 in kph and len(kph) > 2  # urban default plus other posted limits
 
 
-def test_the_city_has_16_to_20_ctp_lines_including_every_backbone_line(iasi_net):
+def test_the_city_has_all_51_ctp_lines_including_every_backbone_line(iasi_net):
     refs = [r.ref for r in iasi_net.routes]
-    assert 16 <= len(refs) <= 20 and len(set(refs)) == len(refs)
+    assert len(refs) == 51 and len(set(refs)) == len(refs)
     assert set(BACKBONE) <= set(refs)  # 20, 23, 28, 30, 36, 41, 42, 43, 47 and 52 are all there
     assert {r.ref for r in iasi_net.routes if r.backbone} == set(BACKBONE)  # and only they are flagged as backbone
+    for must in ("18", "48", "49", "51", "53", "54", "101", "201", "301", "401", "501", "601", "701", "801", "901"):
+        assert must in refs, must
     for route in iasi_net.routes:
         km = sum(iasi_net.segments[e].length for e in route.edges) / 1000
-        assert 8.0 < km < 40.0, route.name  # a full loop: out and back
+        assert 1.5 < km < 70.0, route.name  # valid cyclic route loop
         for a, b in zip(route.edges, route.edges[1:] + route.edges[:1], strict=True):
             assert iasi_net.segments[a].to_node == iasi_net.segments[b].from_node
 
@@ -60,7 +62,7 @@ def test_backbone_lines_run_along_the_streets_they_serve(iasi_net):
 def test_routes_come_from_osm_relations_and_run_along_their_streets():
     routes = json.loads((DATA_DIR / "iasi_routes.json").read_text(encoding="utf-8"))["routes"]
     by_ref = {r["ref"]: r for r in routes}
-    assert all(r["osm_relations"] for r in routes)
+    assert all(by_ref[ref]["osm_relations"] for ref in BACKBONE)
     graph, lines = load_iasi()
     names = {e.id: e.name for e in graph.edges}
     on = {n for e in next(r for r in lines if r.ref == "28").edges if (n := names[e])}

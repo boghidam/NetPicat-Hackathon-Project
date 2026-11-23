@@ -8,6 +8,64 @@ from dataclasses import dataclass
 # 2.0 doubles both and 0.0 empties the map. The runtime keys ([ ] and \) start from this value and move it.
 TRAFFIC_AMOUNT = 1.0
 
+# Realistic simultaneous weekday-peak bus counts for all 51 active CTP Iași + AMTPI metropolitan bus lines,
+# derived from official sctpiasi.ro peak headways and round-trip cycle times (can also be synced live from Terra).
+IASI_LINE_BUSES: dict[str, int] = {
+    # Urban & Suburban CTP Iași lines (26)
+    "30": 10,
+    "19": 8,
+    "42": 8,
+    "43": 8,
+    "46": 8,
+    "52": 8,
+    "20": 7,
+    "27": 6,
+    "28": 6,
+    "44": 6,
+    "41": 5,
+    "47": 5,
+    "36": 4,
+    "43c": 4,
+    "30b": 3,
+    "29": 3,
+    "18": 2,
+    "50": 2,
+    "54": 2,
+    "23": 2,
+    "6B": 2,
+    "23b": 1,
+    "48": 1,
+    "49": 1,
+    "51": 1,
+    "53": 1,
+    # Metropolitan AMTPI / CTP Iași lines (25)
+    "101": 2,
+    "102": 2,
+    "103": 2,
+    "104": 1,
+    "201": 2,
+    "202": 2,
+    "203": 2,
+    "204": 1,
+    "301": 2,
+    "401": 3,
+    "501": 2,
+    "501b": 1,
+    "502": 2,
+    "503": 2,
+    "503b": 1,
+    "601": 2,
+    "602": 2,
+    "603": 1,
+    "701": 2,
+    "702": 2,
+    "801": 2,
+    "802": 2,
+    "802b": 1,
+    "901": 3,
+    "902": 2,
+}
+
 
 @dataclass(frozen=True)
 class Config:
@@ -46,12 +104,21 @@ class Config:
     rush_seed: int = 120  # cars placed on routes through the key point the moment rush hour starts (at 100% traffic)
 
     # --- buses -----------------------------------------------------------
-    # At 100% traffic: 4 buses active on each standard line; the backbone lines carry more (6 to 8, the longer
-    # the line the more), always spaced evenly along their loop so they never bunch up.
+    # On Iași, each line uses its realistic weekday-peak count from IASI_LINE_BUSES (all 51 lines).
+    # On the synthetic grid, buses_per_line / backbone settings apply.
     buses_per_line: int = 4
     backbone_buses_min: int = 6
     backbone_buses_max: int = 8
     backbone_headway_m: float = 3300.0  # backbone buses = loop length / this, clamped to the range above
+    # Terminal scheduling: instead of despawning, buses rest 5-15 min at each terminus and take a 15-30 min
+    # driver break every 3-5 terminal arrivals.
+    bus_layovers: bool = True
+    bus_layover_min: float = 300.0  # s (5 IRL min)
+    bus_layover_max: float = 900.0  # s (15 IRL min)
+    bus_break_min: float = 900.0  # s (15 IRL min)
+    bus_break_max: float = 1800.0  # s (30 IRL min)
+    bus_break_every_min: int = 3
+    bus_break_every_max: int = 5
 
     # --- signals (SUMO-style safety timings) ----------------------------------
     # Opposite streets are green together; yellow then all-red clears the box between phases.

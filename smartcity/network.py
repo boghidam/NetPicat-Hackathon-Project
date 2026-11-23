@@ -56,6 +56,8 @@ class RouteData:
     edges: list[int]  # cyclic, contiguous edge ids
     stops: list[tuple[float, float]] = field(default_factory=list)  # lat, lon
     backbone: bool = False  # a major line that runs more buses
+    turnaround_leg: int = 0  # leg index reaching the far terminus (0 = loop with single terminus)
+    metropolitan: bool = False
 
 
 # ---------------------------------------------------------------------------- projection

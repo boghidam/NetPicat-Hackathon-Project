@@ -10,6 +10,9 @@ from .congestion import CongestionEstimator
 from .controller import IntersectionController, NetworkCoordinator
 from .data import build_city
 from .detection import DetectionLoops
+import copy
+from typing import Any
+
 from .events import EventLog
 from .learning import JunctionLearner, load_memory
 from .mock_api import BusFleet, TelemetryBus
@@ -53,16 +56,25 @@ class Simulation:
             if n.signalised
         }
         self.coord.controllers = self.controllers
-        actual_map = "grid" if "synthetic" in self.net.source else map_name
-        mem = memory if memory is not None else load_memory(map_name=actual_map)
-        self.coord.learner = JunctionLearner(cfg, self.progress, self.coord.load, mem)
+        self._map_name = "grid" if "synthetic" in self.net.source else map_name
+        if memory is not None:
+            self.apply_slot_state(memory)
+        else:
+            from .slots import DEFAULT_SLOT_NAME, SlotManager
+
+            if self._map_name == "iasi":
+                slot = SlotManager().load_slot(DEFAULT_SLOT_NAME, map_name="iasi", fallback_to_default=True)
+                self.apply_slot_state(slot)
+            else:
+                self.coord.learner = JunctionLearner(cfg, self.progress, self.coord.load, None)
         # Consumers see only the API stream, exactly as a real deployment would.
         self.api.subscribe(self.estimator.on_telemetry)
         self.api.subscribe(self.predictor.on_telemetry)
         self.api.subscribe(self.coord.observe)
         self.api.subscribe(self.progress.on_telemetry)
-        for consumer in (self.loops, self.progress, self.predictor):  # a bus taken off the map must be forgotten
+        for consumer in (self.loops, self.progress, self.predictor):  # a bus taken off the map or resting at terminus
             self.fleet.on_remove.append(consumer.forget)
+            self.model.on_bus_rest.append(consumer.forget)
 
         self.incident_at = incident_at
         self.incident_segment = self._pick_incident_segment()
@@ -201,6 +213,34 @@ class Simulation:
         for _ in range(int(round(seconds / self.cfg.dt))):
             self.step()
 
+    # -- ML slot state hydration / export (strictly in-memory) ---------------
+    def apply_slot_state(self, state: dict[str, Any] | None) -> None:
+        """Hydrate `JunctionLearner` and `PostIntersectionPredictor` in RAM from a slot or policy dict."""
+        if not state:
+            self.coord.learner = JunctionLearner(self.cfg, self.progress, self.coord.load, None)
+            return
+        policy = state["policy"] if isinstance(state.get("policy"), dict) else state
+        self.coord.learner = JunctionLearner(self.cfg, self.progress, self.coord.load, policy)
+        if isinstance(state.get("predictor"), dict):
+            self.predictor.load_state(state["predictor"])
+
+    def export_slot_state(self, base_slot: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Snapshot the current in-memory ML state into a schema v2 slot dictionary (no disk I/O)."""
+        from .slots import CURRENT_SCHEMA_VERSION, DEFAULT_SLOT_NAME, SlotManager
+
+        out = copy.deepcopy(base_slot) if base_slot is not None else SlotManager.clean_state(
+            DEFAULT_SLOT_NAME, map_name=self._map_name
+        )
+        out["schema_version"] = CURRENT_SCHEMA_VERSION
+        meta = out.setdefault("metadata", {})
+        meta.setdefault("map", self._map_name)
+        if self.coord.learner is not None:
+            pol = self.coord.learner.memory()
+            out["policy"] = pol
+            meta["episodes"] = max(int(meta.get("episodes", 0)), int(pol.get("episodes", 0)))
+        out["predictor"] = self.predictor.export_state()
+        return out
+
     # -- metrics -----------------------------------------------------------------
     def metrics(self) -> dict[str, float]:
         """KPIs as of now. The HUD asks every frame but they only change with the clock, so one tick's answer is
@@ -213,14 +253,28 @@ class Simulation:
     def _compute_metrics(self) -> dict[str, float]:
         buses = self.fleet.buses
         elapsed = sum(b.elapsed for b in buses) or 1.0
+        # Honest bus-inferred arterial traffic flow (strictly from bus telemetry, never reading car positions)
+        obs = [
+            1.0 - self.coord.est_load[s.id]
+            for s in self.net.segments
+            if self.estimator.confidence(s.id, self.t) >= 0.05
+        ]
+        predicted_flow = sum(obs) / len(obs) if obs else (1.0 - self.cfg.est_prior_load)
+        driving = sum(1 for b in buses if b.status == "DRIVING")
+        layover = sum(1 for b in buses if b.status == "LAYOVER")
+        on_break = sum(1 for b in buses if b.status == "DRIVER_BREAK")
         return {
             "t": self.t,
             "bus_delay_ratio": sum(b.delay for b in buses) / elapsed,  # share of travel time lost
             "bus_delay_recent": self.slow_ema,
+            "predicted_flow": predicted_flow,  # inferred strictly from bus telemetry (0..1)
             "mean_density": self.model.mean_density(),
             "peak_density": self.peak_density,
             "throughput": float(self.model.exited),
             "cars": float(self.model.n_cars),
+            "buses_driving": float(driving),
+            "buses_layover": float(layover),
+            "buses_break": float(on_break),
             "car_speed": self.model.car_speed_ratio,
             # mean car speed / limit over every car-second of the run (steadier than the 30 s EMA above)
             "car_speed_avg": self.model.car_ratio_sum / self.model.car_ratio_n if self.model.car_ratio_n else 1.0,
