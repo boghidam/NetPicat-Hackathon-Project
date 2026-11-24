@@ -55,6 +55,9 @@ def test_web_api_and_websocket_endpoints(tmp_path, monkeypatch):
             assert frame["mode"] == "aether"
             assert frame["kpis"]["total_routes"] == 51
             assert 0.0 <= frame["kpis"]["predicted_flow"] <= 1.0
+            assert "passenger_hours_saved_per_rider" in frame["kpis"]
+            assert "passenger_mins_saved_per_rider" in frame["kpis"]
+            assert frame["kpis"]["cars_count"] >= 1000
             assert "buses_driving" in frame["kpis"] and "buses_layover" in frame["kpis"]
             ws.send_json({"cmd": "set_adaptive", "adaptive": False})
             # Drain any already-queued 20 Hz frame before the command took effect

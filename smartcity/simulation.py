@@ -79,8 +79,10 @@ class Simulation:
         self.incident_at = incident_at
         self.incident_segment = self._pick_incident_segment()
         self.incident_started = False
-        self.traffic_percent = 100.0  # cars and buses relative to normal, 0 to 1000
+        self.traffic_percent = 100.0  # cars relative to normal, 0 to 1000 (bus schedule stays fixed)
         self.rush_point: str | None = None  # name of the key point under rush-hour pressure
+        self.day_cycle_enabled: bool = cfg.day_cycle_enabled
+        self.day_minutes: float = 7.5 * 60.0  # starts at 07:30 morning commute when enabled
         self._since_refresh = cfg.decision_period  # force an initial refresh
         if cfg.traffic_amount != 1.0:  # the world is built at 100%; scale it to the configured TRAFFIC_AMOUNT
             self.set_traffic_percent(cfg.traffic_amount * 100.0)
@@ -130,18 +132,17 @@ class Simulation:
 
     # -- runtime traffic controls ---------------------------------------------
     def set_traffic_percent(self, percent: float) -> None:
-        """Set the amount of cars and buses: 100 is normal traffic, 0 is none, up to 1000 (ten times as much)."""
+        """Set the car traffic load (0 to 1000% of normal); the CTP bus schedule stays fixed to its deployed fleet."""
         percent = float(max(0.0, min(1000.0, percent)))
         old = self.traffic_percent
         if percent == old:
             return
         self.traffic_percent = percent
         self.model.set_car_percent(percent, old)
-        self.fleet.set_percent(percent)
         self.events.add(
             self.t,
             "INFO",
-            f"traffic {percent:g}% of normal: {self.model.n_cars} cars, {len(self.fleet.buses)} buses",
+            f"car traffic {percent:g}% of normal: {self.model.n_cars} cars ({len(self.fleet.buses)} buses unchanged)",
         )
 
     def step_traffic(self, direction: int) -> None:
@@ -188,11 +189,54 @@ class Simulation:
         junctions = [n for n in net.nodes if n.signalised] or [n for n in net.nodes if not n.gate]
         return min(junctions, key=lambda n: math.hypot(n.x - x, n.y - y)).id
 
+    @staticmethod
+    def day_demand_multiplier(minutes_of_day: float) -> float:
+        """Realistic 24-hour Iași commute demand curve (07:30-09:00 AM & 16:30-18:45 PM peaks)."""
+        h = (minutes_of_day % 1440.0) / 60.0
+        knots = (
+            (0.0, 0.35), (5.0, 0.40), (6.5, 0.78), (8.0, 1.34), (9.5, 1.05),
+            (11.5, 0.84), (13.5, 1.08), (15.5, 1.02), (17.5, 1.40), (19.5, 0.96),
+            (21.5, 0.58), (24.0, 0.35),
+        )
+        for i in range(len(knots) - 1):
+            h0, v0 = knots[i]
+            h1, v1 = knots[i + 1]
+            if h0 <= h <= h1:
+                f = (h - h0) / max(1e-6, h1 - h0)
+                return v0 + (v1 - v0) * f
+        return 1.0
+
+    def set_weather(self, weather: str) -> None:
+        self.model.set_weather(weather)
+        self.events.add(self.t, "INFO", f"weather changed to {self.model.weather}")
+
+    def set_day_cycle(self, enabled: bool) -> None:
+        self.day_cycle_enabled = bool(enabled)
+        if not self.day_cycle_enabled:
+            self.model.day_demand_mult = 1.0
+        else:
+            self.model.day_demand_mult = self.day_demand_multiplier(self.day_minutes)
+
+    def set_urban_friction(self, enabled: bool) -> None:
+        self.model.set_urban_friction(enabled)
+
+    def dispatch_ambulance(self) -> bool:
+        amb = self.model.dispatch_ambulance()
+        if amb is not None:
+            self.events.add(self.t, "INFO", f"EMERGENCY {amb.id} dispatched with green-wave preemption")
+            return True
+        return False
+
     # -- stepping ------------------------------------------------------------
     def step(self) -> None:
         cfg, dt = self.cfg, self.cfg.dt
         if self.incident_at is not None and not self.incident_started and self.t >= self.incident_at:
             self.trigger_incident()
+        if self.day_cycle_enabled:
+            # 1 simulated city-minute every 4 simulation seconds -> full rush waves visible in minutes
+            self.day_minutes = (self.day_minutes + dt / 4.0) % 1440.0
+            self.model.day_demand_mult = self.day_demand_multiplier(self.day_minutes)
+        self.coord.emergency_approaches = self.model.emergency_approaches() if self.model.ambulances else set()
         for c in self.controllers.values():
             c.step(self.t, dt)
         self.model.step(self.t, dt, self.coord.signal_state, self.coord.release_factor)

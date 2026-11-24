@@ -610,6 +610,7 @@ html, body {
 .hero-card {
   background: linear-gradient(135deg, #f5faf6 0%, #ffffff 70%);
   border-left: 4px solid var(--kelly-green);
+  padding: 13px 14px 12px;
 }
 
 .card-label {
@@ -730,10 +731,117 @@ html, body {
 }
 
 .val-item strong {
-  font-size: 17px;
+  font-size: 15.5px;
   font-weight: 800;
   color: var(--ink);
   letter-spacing: -0.015em;
+}
+
+.val-item strong small {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--forest-green);
+}
+
+.card-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.info-ic {
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: var(--pearl-white);
+  border: 1px solid rgba(20, 83, 45, 0.22);
+  color: var(--ink-dim);
+  font-size: 9.5px;
+  font-style: normal;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: all 0.15s ease;
+}
+
+.info-ic.sm {
+  width: 13px;
+  height: 13px;
+  font-size: 8.5px;
+  margin-left: 3px;
+  vertical-align: middle;
+}
+
+.tip-target {
+  cursor: help;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.card.tip-target:hover {
+  border-color: rgba(22, 163, 74, 0.45);
+  box-shadow: 0 3px 12px rgba(22, 163, 74, 0.1);
+}
+
+.tip-target:hover .info-ic {
+  background: var(--kelly-green);
+  border-color: var(--kelly-green);
+  color: var(--snow-white);
+}
+
+/* Structured Floating Executive Stat Tooltip */
+.stat-tooltip {
+  position: fixed;
+  width: 274px;
+  background: var(--bottle-green);
+  color: var(--snow-white);
+  border: 1px solid rgba(132, 204, 22, 0.35);
+  border-radius: 13px;
+  padding: 11px 13px;
+  box-shadow: 0 14px 34px rgba(8, 36, 25, 0.34);
+  z-index: 120;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.st-title {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: #bbf7d0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  padding-bottom: 5px;
+}
+
+.st-row {
+  font-size: 11.5px;
+  line-height: 1.42;
+  color: rgba(242, 250, 246, 0.92);
+  display: grid;
+  grid-template-columns: 36px 1fr;
+  gap: 6px;
+}
+
+.st-key {
+  font-weight: 700;
+  color: var(--lime-green);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding-top: 1px;
+}
+
+.st-impact {
+  margin-top: 2px;
+  padding: 5px 8px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 11px;
+  line-height: 1.38;
+  color: #dcfce7;
 }
 
 /* Fleet Status Strip */
@@ -1100,4 +1208,66 @@ html, body {
   .brand-title { display: none; }
   .mode-pill { padding: 6px 12px; font-size: 12px; }
   .drawer { width: min(340px, 88vw); }
+}
+
+/* ==================== REALISM & SCENARIO CONTROLS ==================== */
+.mini-btn.active {
+  background: var(--mint-soft);
+  color: var(--forest-green);
+  border-color: rgba(22, 163, 74, 0.35);
+}
+
+.mini-btn.emg {
+  color: #b91c1c;
+  border-color: rgba(220, 38, 38, 0.25);
+  background: #fff5f5;
+}
+
+.mini-btn.emg:hover {
+  background: #fee2e2;
+  border-color: #ef4444;
+}
+
+.realism-bar {
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px dashed var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.weather-seg {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+  background: var(--pearl-white);
+  padding: 3px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+}
+
+.w-btn {
+  border: none;
+  background: transparent;
+  padding: 5px 4px;
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink-muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.w-btn.active {
+  background: var(--snow-white);
+  color: var(--forest-green);
+  box-shadow: 0 1px 3px rgba(15, 61, 46, 0.12);
+}
+
+.scenario-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 5px;
 }

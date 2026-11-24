@@ -6,6 +6,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+from .buildings import generate_buildings, load_buildings_json
 from .config import Config
 from .network import EdgeData, GraphData, RoadNetwork, RouteData
 
@@ -48,7 +49,18 @@ def build_city(name: str, cfg: Config) -> RoadNetwork:
     """The road network for a map name: "iasi" (real data) or "grid" (small synthetic city)."""
     if name == "iasi":
         graph, routes = load_iasi()
-        return RoadNetwork(graph, cfg, routes)
+        net = RoadNetwork(graph, cfg, routes)
+        r_path = DATA_DIR / "iasi_realism.json"
+        if r_path.exists():
+            net.apply_realism(json.loads(r_path.read_text(encoding="utf-8")))
+        b_path = DATA_DIR / "iasi_buildings.json"
+        buildings = (
+            load_buildings_json(b_path, net)
+            if b_path.exists()
+            else generate_buildings(net, seed=42, urban_radius_m=cfg.urban_radius_m)
+        )
+        net.set_buildings(buildings)
+        return net
     from .synthetic import GRID_GATE_BAND, GRID_MAX_GATES, grid_data, grid_routes
 
     # The test grid is a few hundred metres across: its gates are only the nodes on its edge, so the city-scale

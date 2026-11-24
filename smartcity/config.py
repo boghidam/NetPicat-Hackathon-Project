@@ -94,14 +94,44 @@ class Config:
     lane_offset: float = 3.0  # m lateral offset so opposite directions don't overlap
 
     # --- cars ------------------------------------------------------------
-    gate_demand: float = 0.03  # veh/s entering at each gate
-    initial_cars: int = 450
+    # Calibrated to PMUD Iași / Ziarul de Iași peak perimeter entry flow (~4,200-4,600 veh/h across 16 gates)
+    # and realistic simultaneous moving cars across the 428 km arterial core (excluding parked cars).
+    gate_demand: float = 0.08  # veh/s entering at each gate (~4,600 veh/h across 16 gates)
+    initial_cars: int = 1500
     spawn_backlog_max: int = 40  # cars waiting outside a blocked gate before new ones are dropped
 
+    # --- residential OD & urban distribution (real city maps) ------------
+    urban_radius_m: float = 4200.0  # m from Iași center defining urban core vs outer ring
+    share_city_to_building: float = 0.60  # 60% building-destined city -> city (1-8 km)
+    share_outer_to_building: float = 0.20  # 20% outside -> city building (5-20 km)
+    share_through_city: float = 0.20  # 20% outside -> far outside gate crossing city (5-20 km)
+    city_trip_min_m: float = 1000.0  # 1 km min for city -> city trips
+    city_trip_max_m: float = 8000.0  # 8 km max for city -> city trips
+    outer_trip_min_m: float = 5000.0  # 5 km min for outside -> city & outside -> outside trips
+    outer_trip_max_m: float = 20000.0  # 20 km max for outside -> city & outside -> outside trips
+    building_spawn_max_density: float = 0.30  # Wave 2 only spawns from uncrowded streets (<30% occupied)
+    through_min_angle_deg: float = 90.0  # minimum angular separation between entry & exit gates
+
+    # --- multi-lane, roundabouts & real-world Iași realism ---------------
+    lane_width: float = 3.1  # m lateral spacing between bands in the same direction
+    lane_change_cooldown: float = 3.5  # s minimum between lane changes per vehicle
+    lane_change_duration: float = 1.4  # s smooth lateral animation duration
+    roundabout_speed: float = 7.2  # m/s (~26 km/h) circulating speed inside roundabouts
+    roundabout_tc_car: float = 3.6  # s critical gap for cars entering a roundabout
+    roundabout_tc_bus: float = 4.8  # s critical gap for buses/trucks entering a roundabout
+    roundabout_tf: float = 2.2  # s follow-up headway inside the same accepted circulating gap
+    yield_tc: float = 3.4  # s critical gap at unsignalized Cedează T-junctions
+    bus_stops_enabled: bool = True  # realistic 8-24s passenger boarding dwell at real CTP stops
+    crosswalks_enabled: bool = True  # stochastic pedestrian crossing pulses at major Iași hubs
+    rail_crossings_enabled: bool = True  # periodic CFR rail barrier pulses
+    urban_friction_enabled: bool = False  # optional curbside double-parking ("5 min pe avarii") on 2-3 lane streets
+    weather: str = "clear"  # "clear" | "rain" | "snow"
+    day_cycle_enabled: bool = False  # optional 24h simulated city clock (06:00-22:00 rush waves)
+
     # --- rush hour at a key point (runtime option) ----------------------------
-    rush_extra: float = 2.0  # extra car demand at every gate, as a multiple of normal, routed through the key point
+    rush_extra: float = 2.6  # extra car demand at every gate, as a multiple of normal, routed through the key point
     rush_reach: float = 2000.0  # m: the seeded commuters are placed this close (along their trip) to the key point
-    rush_seed: int = 120  # cars placed on routes through the key point the moment rush hour starts (at 100% traffic)
+    rush_seed: int = 340  # cars placed on routes through the key point the moment rush hour starts (scaled for multi-lane boulevards)
 
     # --- buses -----------------------------------------------------------
     # On Iași, each line uses its realistic weekday-peak count from IASI_LINE_BUSES (all 51 lines).
@@ -147,10 +177,10 @@ class Config:
     # --- bus green hold (classic transit signal priority) -----------------------
     # When a green is about to end and a moving bus on it would reach the stop line a few seconds later, the green
     # is held just long enough for it to clear (never shortened).
-    hold_horizon: float = 9.0  # s: the longest hold for one arriving bus (0 switches holding off)
+    hold_horizon: float = 11.5  # s: the longest hold for one arriving bus (0 switches holding off)
     hold_margin: float = 1.0  # s added to the bus's arrival estimate
     hold_min_speed: float = 3.5  # m/s assumed for a bus rolling up in a discharging queue
-    hold_window: float = 95.0  # m before the stop line that a bus must be within to be held for
+    hold_window: float = 135.0  # m before the stop line that a bus must be within to be held for
     hold_min_openness: float = 0.55  # hold only if the streets ahead are at least this open (0..1)
 
     # --- online learning per junction (counterfactual odometer credit assignment) ---
@@ -163,7 +193,7 @@ class Config:
     hop2_weight: float = 0.95  # how much the second junction downstream counts against lengthening a green
     budget_window: float = 60.0  # s
     budget_per_junction: float = (
-        3.5  # extension seconds per signalised junction per window: the cap grows with the network
+        5.0  # extension seconds per signalised junction per window: scaled for 51 active CTP lines
     )
     budget_min: float = 30.0  # s: the floor for a small network, where 1.2 s per signal would allow almost nothing
     budget_seconds: float | None = None  # an explicit network-wide cap that replaces the per-junction one

@@ -48,8 +48,37 @@
       this.segs = [];
       this.nodes = [];
       this.routes = [];
+      this.buildings = [];
+      this.cityBuildings = [];
+      this.outerBuildings = [];
+      this.cityBldgPool = [];
+      this.outerBldgPool = [];
+      this.gates = [];
+      this.citySegSet = new Set();
+      this.outEdges = [];
+      this.prevEdge = null;
+      this.pathLenM = null;
+      this.cityDestsByNode = [];
+      this.outerDestsByNode = [];
+      this.throughGatePairs = [];
       this.buses = [];
       this.cars = [];
+      this.ambulances = [];
+      this.roundabouts = [];
+      this.roundaboutByNode = new Map();
+      this.yieldNodes = new Set();
+      this.busStopsBySeg = new Map();
+      this.crosswalks = [];
+      this.activeCrosswalks = new Map();
+      this.railCrossings = [];
+      this.activeRails = new Set();
+      this.hospitals = [];
+      this.frictionPts = [];
+      this.weather = "clear";
+      this.dayCycle = false;
+      this.dayMinutes = 7.5 * 60;
+      this.urbanFriction = false;
+      this.activeByKind = { city_to_building: 0, outer_to_building: 0, through_city: 0 };
       this.signals = new Map();
       this.rings = [];
       this.slots = {};
@@ -77,17 +106,19 @@
     }
 
     async init() {
-      const [core, routesDoc, defaultSlot] = await Promise.all([
+      const [core, routesDoc, buildingsDoc, realismDoc, defaultSlot] = await Promise.all([
         fetchFirstJson(["./data/iasi_core.json", "../data/iasi_core.json", "/data/iasi_core.json"]),
         fetchFirstJson(["./data/iasi_routes.json", "../data/iasi_routes.json", "/data/iasi_routes.json"]),
+        fetchFirstJson(["./data/iasi_buildings.json", "../data/iasi_buildings.json", "/data/iasi_buildings.json"]).catch(() => null),
+        fetchFirstJson(["./data/iasi_realism.json", "../data/iasi_realism.json", "/data/iasi_realism.json"]).catch(() => null),
         fetchFirstJson(["./data/slots/default.json", "../data/slots/default.json", "/data/slots/default.json"]).catch(() => null),
       ]);
 
       this._loadSlots(defaultSlot);
       this._loadCredentials();
-      this._buildNetwork(core, routesDoc);
+      this._buildNetwork(core, routesDoc, buildingsDoc, realismDoc);
       this._spawnFleet();
-      this._spawnCars(280);
+      this._spawnCars(1500);
       return this.mapPayload;
     }
 
@@ -125,20 +156,24 @@
       this.terraStatus.agency_id = agency;
     }
 
-    _buildNetwork(core, routesDoc) {
-      const lats = core.nodes.map((n) => n.lat);
-      const lons = core.nodes.map((n) => n.lon);
-      const lat0 = (Math.min(...lats) + Math.max(...lats)) / 2;
-      const lon0 = (Math.min(...lons) + Math.max(...lons)) / 2;
+    _buildNetwork(core, routesDoc, buildingsDoc, realismDoc) {
+      // Use exact mean (lat0, lon0) matching smartcity/network.py
+      const lat0 = core.nodes.reduce((a, n) => a + n.lat, 0) / core.nodes.length;
+      const lon0 = core.nodes.reduce((a, n) => a + n.lon, 0) / core.nodes.length;
       const kx = 111320 * Math.cos((lat0 * Math.PI) / 180);
       const ky = 110540;
       this.proj = { lat0, lon0, kx, ky };
       const toXY = (lat, lon) => [(lon - lon0) * kx, (lat - lat0) * ky];
+      const [cityCx, cityCy] = toXY(47.161, 27.583);
+      this.cityCenter = [cityCx, cityCy];
+      this.urbanRadius = 4200.0;
 
       this.nodes = core.nodes.map((n) => {
         const [x, y] = toXY(n.lat, n.lon);
-        return { id: n.id, x, y, lat: n.lat, lon: n.lon, inCount: 0 };
+        return { id: n.id, x, y, lat: n.lat, lon: n.lon, inCount: 0, outCount: 0 };
       });
+      const N = this.nodes.length;
+      this.outEdges = Array.from({ length: N }, () => []);
 
       const nodeMap = new Map(this.nodes.map((n) => [n.id, n]));
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -148,8 +183,10 @@
       });
 
       const twin = new Map();
+      this.citySegSet = new Set();
       this.segs = core.edges.map((e) => {
         nodeMap.get(e.v).inCount += 1;
+        nodeMap.get(e.u).outCount += 1;
         twin.set(`${e.u}:${e.v}`, e.id);
         const pts = e.geometry.map(([lon, lat]) => toXY(lat, lon));
         const cum = [0];
@@ -157,26 +194,175 @@
           cum.push(cum[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
         }
         const rawLen = cum[cum.length - 1] || 1;
-        const speed = (e.maxspeed_kph || 50) / 3.6;
-        const stopPos = Math.max(e.length * 0.6, e.length - 14);
-        return {
+        const speed = Math.max(20, Math.min(70, e.maxspeed_kph || 50)) / 3.6;
+        const stopPos = e.length - Math.min(14, 0.4 * e.length);
+        const seg = {
           id: e.id, u: e.u, v: e.v, length: e.length, rawLen, speed, stopPos,
           hwy: (e.highway || "tertiary").replace("_link", ""),
           name: e.name || "",
           pts, cum,
         };
+        this.outEdges[e.u].push(seg);
+        const mid = pts[Math.floor(pts.length / 2)];
+        if (Math.hypot(mid[0] - cityCx, mid[1] - cityCy) <= this.urbanRadius) {
+          this.citySegSet.add(seg.id);
+        }
+        return seg;
       });
+
+      // Perimeter gates matching smartcity/network.py (_choose_gates)
+      const band = 700.0;
+      const gateCands = [];
+      for (const n of this.nodes) {
+        const onEdge = Math.min(n.x - minX, maxX - n.x, n.y - minY, maxY - n.y) <= band;
+        if (onEdge && n.inCount > 0 && n.outCount > 0) {
+          gateCands.push([n.id, n.inCount]);
+        }
+      }
+      gateCands.sort((a, b) => b[1] - a[1]);
+      this.gates = [];
+      if (gateCands.length) {
+        this.gates.push(gateCands[0][0]);
+        while (this.gates.length < Math.min(16, gateCands.length)) {
+          let bestId = -1, bestDist = -1;
+          for (const [cid] of gateCands) {
+            if (this.gates.includes(cid)) continue;
+            const cn = this.nodes[cid];
+            let md = Infinity;
+            for (const gid of this.gates) {
+              const gn = this.nodes[gid];
+              md = Math.min(md, Math.hypot(cn.x - gn.x, cn.y - gn.y));
+            }
+            if (md > bestDist) { bestDist = md; bestId = cid; }
+          }
+          if (bestId < 0) break;
+          this.gates.push(bestId);
+        }
+      }
+
+      // Buildings dataset (same coordinates & zoning as Python backend)
+      const rawBldgs = (buildingsDoc && (buildingsDoc.buildings || buildingsDoc)) || [];
+      this.buildings = [];
+      for (const b of rawBldgs) {
+        if (b.seg_id < 0 || b.seg_id >= this.segs.length) continue;
+        const [bx, by] = toXY(b.lat, b.lon);
+        const seg = this.segs[b.seg_id];
+        this.buildings.push({
+          id: b.id,
+          kind: b.kind,
+          zone: b.zone,
+          segId: b.seg_id,
+          posM: Math.max(10, Math.min(seg.stopPos - 8, b.pos_m)),
+          x: bx, y: by, w: b.w, d: b.d, angle: b.angle,
+          capacity: b.capacity || (b.kind === "apartment" ? 4 : 1),
+        });
+      }
+      this.cityBuildings = this.buildings.filter((b) => b.zone === "city");
+      this.outerBuildings = this.buildings.filter((b) => b.zone === "outer");
+      this.cityBldgPool = [];
+      this.cityBuildings.forEach((b) => { for (let k = 0; k < b.capacity; k++) this.cityBldgPool.push(b); });
+      this.outerBldgPool = [];
+      this.outerBuildings.forEach((b) => { for (let k = 0; k < b.capacity; k++) this.outerBldgPool.push(b); });
+
+      this._buildRoutingTables();
+
+      // Apply Iași realism metadata (multi-lane, roundabouts, yield T-junctions, 228 bus stops, crosswalks, rail, hospitals)
+      const edgeLanes = (realismDoc && realismDoc.edge_lanes) || {};
+      const edgeGrades = (realismDoc && realismDoc.edge_grades) || {};
+      const rbRaw = (realismDoc && realismDoc.roundabouts) || [];
+      this.yieldNodes = new Set(((realismDoc && realismDoc.yield_nodes) || []).map(Number));
+      const rbByNodeRaw = new Map(rbRaw.map((r) => [Number(r.node), r]));
+
+      this.segs.forEach((s) => {
+        s.lanes = Math.max(1, Math.min(3, Number(edgeLanes[String(s.id)] || 1)));
+        s.oneway = !twin.has(`${s.v}:${s.u}`);
+        s.gradePct = Number(edgeGrades[String(s.id)] || 0);
+        const rbi = rbByNodeRaw.get(s.v);
+        if (rbi) s.stopPos = s.length - Math.min(Number(rbi.radius_m) + 4.5, 0.42 * s.length);
+      });
+
+      this.roundabouts = [];
+      this.roundaboutByNode = new Map();
+      const rbTuples = [];
+      for (const r of rbRaw) {
+        const nid = Number(r.node);
+        const nd = this.nodes[nid];
+        if (!nd) continue;
+        const rad = Number(r.radius_m);
+        const armAngles = new Map();
+        for (const s of this.segs) {
+          if (s.v === nid) {
+            const pRim = Math.max(0, s.length - Math.min(rad + 3.0, s.length * 0.42));
+            const [px, py, dx, dy] = this._posOnSeg(s, pRim);
+            const off = this._laneOffset(s, 0);
+            armAngles.set(s.id, Math.atan2(py - dx * off - nd.y, px + dy * off - nd.x));
+          } else if (s.u === nid) {
+            const pRim = Math.min(s.length, Math.min(rad + 2.5, s.length * 0.35));
+            const [px, py, dx, dy] = this._posOnSeg(s, pRim);
+            const off = this._laneOffset(s, 0);
+            armAngles.set(s.id, Math.atan2(py - dx * off - nd.y, px + dy * off - nd.x));
+          }
+        }
+        const obj = {
+          node: nid, name: r.name, x: nd.x, y: nd.y,
+          radius: rad, ringLanes: Number(r.ring_lanes || 1),
+          signalized: !!r.signalized, armAngles,
+        };
+        this.roundabouts.push(obj);
+        this.roundaboutByNode.set(nid, obj);
+        rbTuples.push([nid, r.name, Math.round(nd.x * 10) / 10, Math.round(nd.y * 10) / 10, obj.radius, obj.ringLanes, obj.signalized ? 1 : 0]);
+      }
+
+      this.busStopsBySeg = new Map();
+      const busStopTuples = [];
+      for (const st of ((realismDoc && realismDoc.bus_stops) || [])) {
+        const seg = this.segs[st.seg_id];
+        if (!seg) continue;
+        const [sx, sy, dx, dy] = this._posOnSeg(seg, st.pos_m);
+        const off = this._laneOffset(seg, 0);
+        const bx = sx + dy * off, by = sy - dx * off;
+        const item = { id: st.id, segId: st.seg_id, posM: st.pos_m, hasBay: !!st.has_bay, demand: Number(st.demand || 1) };
+        if (!this.busStopsBySeg.has(st.seg_id)) this.busStopsBySeg.set(st.seg_id, []);
+        this.busStopsBySeg.get(st.seg_id).push(item);
+        busStopTuples.push([st.id, Math.round(bx * 10) / 10, Math.round(by * 10) / 10, st.has_bay ? 1 : 0, st.name]);
+      }
+
+      this.crosswalks = [];
+      const cwTuples = [];
+      for (const cw of ((realismDoc && realismDoc.crosswalks) || [])) {
+        const seg = this.segs[cw.seg_id];
+        if (!seg) continue;
+        const [cx, cy, dx, dy] = this._posOnSeg(seg, cw.pos_m);
+        this.crosswalks.push({ id: cw.id, segId: cw.seg_id, posM: cw.pos_m, rate: Number(cw.rate || 0.02) });
+        cwTuples.push([cw.id, Math.round(cx * 10) / 10, Math.round(cy * 10) / 10, Math.round(dx * 100) / 100, Math.round(dy * 100) / 100, seg.lanes]);
+      }
+
+      this.railCrossings = [];
+      const railTuples = [];
+      for (const rc of ((realismDoc && realismDoc.rail_crossings) || [])) {
+        const seg = this.segs[rc.seg_id];
+        if (!seg) continue;
+        const [rx, ry, dx, dy] = this._posOnSeg(seg, rc.pos_m);
+        this.railCrossings.push({ segId: rc.seg_id, posM: rc.pos_m, periodS: rc.period_s, closedS: rc.closed_s, offsetS: rc.offset_s });
+        railTuples.push([rc.seg_id, Math.round(rx * 10) / 10, Math.round(ry * 10) / 10, Math.round(dx * 100) / 100, Math.round(dy * 100) / 100, rc.name]);
+      }
+
+      this.hospitals = ((realismDoc && realismDoc.hospitals) || []).map((h) => ({ name: h.name, node: Number(h.node) }));
 
       const roads = [];
       const segGeoms = {};
       const stopLines = {};
+      const gateSet = new Set(this.gates);
       this.segs.forEach((s) => {
         segGeoms[s.id] = s.pts.map(([x, y]) => [Math.round(x * 10) / 10, Math.round(y * 10) / 10]);
         const back = twin.get(`${s.v}:${s.u}`);
         if (back === undefined || back >= s.id) {
-          roads.push({ id: s.id, hwy: s.hwy, pts: segGeoms[s.id] });
+          const totalLanes = back === undefined ? s.lanes : (s.lanes + this.segs[back].lanes);
+          roads.push({ id: s.id, hwy: s.hwy, lanes: s.lanes, total_lanes: totalLanes, oneway: s.oneway, pts: segGeoms[s.id] });
         }
-        if (nodeMap.get(s.v).inCount >= 3) {
+        const rbTarget = this.roundaboutByNode.get(s.v);
+        const isSigNode = rbTarget ? rbTarget.signalized : (nodeMap.get(s.v).inCount >= 3 && !gateSet.has(s.v) && !this.yieldNodes.has(s.v));
+        if (isSigNode) {
           const [x, y, dx, dy] = this._posOnSeg(s, s.stopPos);
           stopLines[s.id] = [x - dy * 4.2, y + dx * 4.2, x + dy * 4.2, y - dx * 4.2];
           this.signals.set(s.id, { phaseOffset: (s.v * 7 + (s.id % 2) * 25) % 50, state: "G" });
@@ -198,6 +384,12 @@
       });
       this.landmarks = landmarks;
 
+      const buildingTuples = this.buildings.map((b) => [
+        b.id, b.kind === "apartment" ? 1 : 0, b.zone === "city" ? 1 : 0,
+        Math.round(b.x * 10) / 10, Math.round(b.y * 10) / 10,
+        Math.round(b.w * 10) / 10, Math.round(b.d * 10) / 10, Math.round(b.angle * 1000) / 1000,
+      ]);
+
       this.mapPayload = {
         bounds: [minX, minY, maxX, maxY],
         proj: { lat0, lon0, kx },
@@ -206,8 +398,260 @@
         stop_lines: stopLines,
         landmarks,
         routes: this.routes,
+        buildings: buildingTuples,
+        roundabouts: rbTuples,
+        bus_stops: busStopTuples,
+        crosswalks: cwTuples,
+        rail_crossings: railTuples,
         key_points: landmarks.map((l) => l.name),
         signals_count: Object.keys(stopLines).length,
+      };
+    }
+
+    _laneOffset(seg, laneV) {
+      const n = seg.lanes || 1;
+      if (n <= 1) return 3.0;
+      if (seg.oneway) return ((n - 1) * 0.5 - laneV) * 3.1;
+      return 1.9 + (n - 1 - laneV) * 3.1;
+    }
+
+    _rbLaneRadius(rb, laneV) {
+      if (rb.ringLanes <= 1) return Math.max(6, rb.radius + 0.2);
+      return Math.max(6, rb.radius + 0.7 - laneV * 3.6);
+    }
+
+    _vehicleXY(c) {
+      if (c.rbNode != null) {
+        const rb = this.roundaboutByNode.get(c.rbNode);
+        if (rb) {
+          const rEff = this._rbLaneRadius(rb, c.rbLane || 0);
+          const ca = Math.cos(c.rbAngle), sa = Math.sin(c.rbAngle);
+          return [rb.x + rEff * ca, rb.y + rEff * sa, -sa, ca];
+        }
+      }
+      const seg = this.segs[c.segId];
+      let posDraw = Math.max(0, c.pos);
+      const rbFrom = this.roundaboutByNode.get(seg.u);
+      const rbTo = this.roundaboutByNode.get(seg.v);
+      const rStart = rbFrom ? Math.min(rbFrom.radius + 2.5, seg.length * 0.35) : 0;
+      const rEnd = rbTo ? Math.min(rbTo.radius + 2.5, seg.length * 0.42) : 0;
+      if (rStart > 0 || rEnd > 0) {
+        const usable = Math.max(1, seg.length - rStart - rEnd);
+        if (rStart > 0 && seg.length > 3.5 * rStart + rEnd) {
+          if (posDraw < 3 * rStart) posDraw = rStart + posDraw * (2 / 3);
+          if (rEnd > 0) posDraw = Math.min(posDraw, seg.length - rEnd);
+        } else {
+          posDraw = rStart + Math.max(0, Math.min(1, posDraw / Math.max(1, seg.length))) * usable;
+        }
+      }
+      const [x, y, dx, dy] = this._posOnSeg(seg, posDraw);
+      const off = this._laneOffset(seg, c.lane || 0) + (c.inBay ? 2.3 : 0);
+      return [x + dy * off, y - dx * off, dx, dy];
+    }
+
+    setWeather(w) {
+      this.weather = ["clear", "rain", "snow"].includes(w) ? w : "clear";
+    }
+
+    setDayCycle(on) {
+      this.dayCycle = !!on;
+    }
+
+    setUrbanFriction(on) {
+      this.urbanFriction = !!on;
+      this.frictionPts = [];
+      if (this.urbanFriction) {
+        const multi = this.segs.filter((s) => s.lanes >= 2 && s.length >= 130 && this.citySegSet.has(s.id));
+        for (let k = 0; k < Math.min(6, multi.length); k++) {
+          const s = multi[Math.floor(Math.random() * multi.length)];
+          const [x, y, dx, dy] = this._posOnSeg(s, s.length * 0.5);
+          const off = this._laneOffset(s, 0);
+          this.frictionPts.push([Math.round((x + dy * off) * 10) / 10, Math.round((y - dx * off) * 10) / 10]);
+        }
+      }
+    }
+
+    dispatchAmbulance() {
+      if (!this.hospitals.length || !this.cityBuildings.length) return;
+      for (let t = 0; t < 10; t++) {
+        const hosp = this.hospitals[Math.floor(Math.random() * this.hospitals.length)];
+        const dest = this.cityBuildings[Math.floor(Math.random() * this.cityBuildings.length)];
+        const mid = this._pathBetween(hosp.node, this.segs[dest.segId].u);
+        if (!mid || mid.length < 3) continue;
+        const route = [...mid, dest.segId];
+        const seg = this.segs[route[0]];
+        this.cars.push({
+          route, leg: 0, segId: route[0], pos: 6, factor: 1.32,
+          tripKind: "emergency", destPos: dest.posM, lane: seg.lanes - 1, cls: 3, rbNode: null,
+        });
+        return;
+      }
+    }
+
+    _buildRoutingTables() {
+      const N = this.nodes.length;
+      this.prevEdge = new Int16Array(N * N);
+      this.prevEdge.fill(-1);
+      this.pathLenM = new Float32Array(N * N);
+      this.pathLenM.fill(-1);
+
+      const distT = new Float64Array(N);
+      const distL = new Float64Array(N);
+      const visited = new Uint8Array(N);
+
+      for (let src = 0; src < N; src++) {
+        distT.fill(Infinity);
+        distL.fill(-1);
+        visited.fill(0);
+        distT[src] = 0;
+        distL[src] = 0;
+        const base = src * N;
+
+        for (let iter = 0; iter < N; iter++) {
+          let u = -1, best = Infinity;
+          for (let i = 0; i < N; i++) {
+            if (!visited[i] && distT[i] < best) { best = distT[i]; u = i; }
+          }
+          if (u < 0) break;
+          visited[u] = 1;
+          this.pathLenM[base + u] = distL[u];
+          const outs = this.outEdges[u];
+          for (let k = 0; k < outs.length; k++) {
+            const s = outs[k];
+            const nt = best + s.length / s.speed;
+            if (nt < distT[s.v]) {
+              distT[s.v] = nt;
+              distL[s.v] = distL[u] + s.length;
+              this.prevEdge[base + s.v] = s.id;
+            }
+          }
+        }
+      }
+
+      // Precompute distance-bucketed destination building arrays per node
+      this.cityDestsByNode = Array.from({ length: N }, () => []);
+      this.outerDestsByNode = Array.from({ length: N }, () => []);
+      for (let nid = 0; nid < N; nid++) {
+        const base = nid * N;
+        const cArr = this.cityDestsByNode[nid];
+        const oArr = this.outerDestsByNode[nid];
+        for (let i = 0; i < this.cityBuildings.length; i++) {
+          const b = this.cityBuildings[i];
+          const d = this.pathLenM[base + this.segs[b.segId].u];
+          if (d >= 0) {
+            if (d >= 400 && d <= 8400) cArr.push(b);
+            if (d >= 4200 && d <= 20600) oArr.push(b);
+          }
+        }
+      }
+
+      // Precompute cross-city opposite-gate pairs (>= 90 deg, 5-20 km, crossing city >= 25%)
+      const [cx, cy] = this.cityCenter;
+      const gateAng = new Map(this.gates.map((g) => [g, Math.atan2(this.nodes[g].y - cy, this.nodes[g].x - cx)]));
+      const minRad = (90 * Math.PI) / 180;
+      this.throughGatePairs = [];
+      for (const g1 of this.gates) {
+        for (const g2 of this.gates) {
+          if (g1 === g2) continue;
+          let da = Math.abs(gateAng.get(g2) - gateAng.get(g1)) % (2 * Math.PI);
+          if (da > Math.PI) da = 2 * Math.PI - da;
+          if (da < minRad) continue;
+          const totalLen = this.pathLenM[g1 * N + g2];
+          if (totalLen < 5000 || totalLen > 20000) continue;
+          const path = this._pathBetween(g1, g2);
+          if (!path || !path.length) continue;
+          let cityLen = 0;
+          for (const sid of path) if (this.citySegSet.has(sid)) cityLen += this.segs[sid].length;
+          if (cityLen / totalLen >= 0.25) {
+            this.throughGatePairs.push({ g1, g2, path, distM: totalLen });
+          }
+        }
+      }
+    }
+
+    _pathBetween(u, v) {
+      if (u === v) return [];
+      const N = this.nodes.length;
+      const base = u * N;
+      if (this.prevEdge[base + v] < 0) return null;
+      const rev = [];
+      let cur = v, guard = 0;
+      while (cur !== u && guard++ < N) {
+        const eid = this.prevEdge[base + cur];
+        if (eid < 0) return null;
+        rev.push(eid);
+        cur = this.segs[eid].u;
+      }
+      if (cur !== u) return null;
+      rev.reverse();
+      return rev;
+    }
+
+    _makeBuildingTrip(orig, minM, maxM) {
+      const origSeg = this.segs[orig.segId];
+      const bucket = (orig.zone === "city" && maxM <= 8001)
+        ? this.cityDestsByNode[origSeg.v]
+        : this.outerDestsByNode[origSeg.v];
+      if (!bucket || !bucket.length) return null;
+      const N = this.nodes.length;
+      for (let t = 0; t < 24; t++) {
+        const dest = bucket[Math.floor(Math.random() * bucket.length)];
+        if (dest.id === orig.id || dest.segId === orig.segId) continue;
+        const destSeg = this.segs[dest.segId];
+        const midLen = this.pathLenM[origSeg.v * N + destSeg.u];
+        if (midLen < 0) continue;
+        const total = Math.max(0, origSeg.length - orig.posM) + midLen + dest.posM;
+        if (total < minM || total > maxM) continue;
+        const mid = this._pathBetween(origSeg.v, destSeg.u);
+        if (!mid || mid.includes(orig.segId) || mid.includes(dest.segId)) continue;
+        return { route: [orig.segId, ...mid, dest.segId], dest, distM: total };
+      }
+      return null;
+    }
+
+    _makeGateToBuildingTrip(gate, minM, maxM) {
+      const bucket = this.outerDestsByNode[gate];
+      if (!bucket || !bucket.length) return null;
+      const N = this.nodes.length;
+      for (let t = 0; t < 24; t++) {
+        const dest = bucket[Math.floor(Math.random() * bucket.length)];
+        const destSeg = this.segs[dest.segId];
+        const midLen = this.pathLenM[gate * N + destSeg.u];
+        if (midLen < 0) continue;
+        const total = midLen + dest.posM;
+        if (total < minM || total > maxM) continue;
+        const mid = this._pathBetween(gate, destSeg.u);
+        if (!mid || mid.includes(dest.segId)) continue;
+        return { route: [...mid, dest.segId], dest, distM: total };
+      }
+      return null;
+    }
+
+    _placeCarOnRoute(route, tripKind, destPos, startMinPos) {
+      let totalW = 0;
+      const cumW = [];
+      for (let i = 0; i < route.length; i++) {
+        const s = this.segs[route[i]];
+        const lo = i === 0 ? startMinPos : 0;
+        const hi = (destPos != null && i === route.length - 1) ? Math.min(s.length, destPos) : s.length;
+        totalW += Math.max(0, hi - lo) / Math.max(1, s.speed);
+        cumW.push(totalW);
+      }
+      if (totalW <= 0) return null;
+      const r = Math.random() * totalW;
+      let leg = 0;
+      while (leg < cumW.length - 1 && cumW[leg] < r) leg++;
+      const s = this.segs[route[leg]];
+      const lo = leg === 0 ? startMinPos : 4;
+      const hi = (destPos != null && leg === route.length - 1) ? Math.min(s.stopPos - 4, destPos - 5) : (s.stopPos - 4);
+      const pos = hi > lo + 1 ? lo + Math.random() * (hi - lo) : Math.max(0, Math.min(s.length * 0.5, hi));
+      const rCls = Math.random();
+      const cls = rCls < (tripKind === "through_city" ? 0.14 : 0.05) ? 2 : (rCls < 0.22 ? 1 : 0);
+      const lane = (destPos != null && leg === route.length - 1) ? 0 : Math.floor(Math.random() * (s.lanes || 1));
+      return {
+        route, leg, segId: route[leg], pos,
+        factor: (cls === 2 ? 0.80 : cls === 1 ? 0.92 : 1.0) * (0.88 + Math.random() * 0.18),
+        tripKind, destPos: destPos != null ? destPos : null, lane, cls, rbNode: null,
       };
     }
 
@@ -224,11 +668,10 @@
 
     _spawnFleet() {
       this.buses = [];
-      const scale = this.trafficPercent / 100;
+      // Bus fleet strictly follows CTP Iași's realistic 51-line schedule (unaffected by car traffic load!)
       let bid = 0;
       for (const r of this.routes) {
-        const base = this.baseLineCounts[r.ref] ?? 2;
-        const n = Math.max(0, Math.round(base * scale));
+        const n = Math.max(0, Math.round(this.baseLineCounts[r.ref] ?? 2));
         for (let k = 0; k < n; k++) {
           const leg = Math.floor((k / Math.max(1, n)) * r.edges.length);
           const seg = this.segs[r.edges[leg]];
@@ -250,10 +693,123 @@
 
     _spawnCars(count) {
       this.cars = [];
-      const n = Math.round(count * (this.trafficPercent / 100));
-      for (let i = 0; i < n; i++) {
-        const seg = this.segs[Math.floor(Math.random() * this.segs.length)];
-        this.cars.push({ segId: seg.id, pos: Math.random() * seg.length, factor: 0.85 + Math.random() * 0.2 });
+      this.activeByKind = { city_to_building: 0, outer_to_building: 0, through_city: 0 };
+      const total = Math.round(count * (this.trafficPercent / 100));
+      if (total <= 0) return;
+      if (!this.cityBldgPool.length || !this.throughGatePairs.length) {
+        for (let i = 0; i < total; i++) {
+          const seg = this.segs[Math.floor(Math.random() * this.segs.length)];
+          this.cars.push({ route: [seg.id], leg: 0, segId: seg.id, pos: Math.random() * seg.length, factor: 0.85 + Math.random() * 0.2, tripKind: "through_city", destPos: null });
+        }
+        return;
+      }
+
+      const nCity = Math.round(total * 0.60);
+      const nOuter = Math.round(total * 0.20);
+      const nThru = Math.max(0, total - nCity - nOuter);
+
+      // Wave 1: 60% City -> City Building (1-8 km)
+      for (let i = 0; i < nCity; i++) {
+        for (let a = 0; a < 8; a++) {
+          const orig = this.cityBldgPool[Math.floor(Math.random() * this.cityBldgPool.length)];
+          const trip = this._makeBuildingTrip(orig, 1000, 8000);
+          if (!trip) continue;
+          const c = this._placeCarOnRoute(trip.route, "city_to_building", trip.dest.posM, orig.posM);
+          if (c) { this.cars.push(c); this.activeByKind.city_to_building++; break; }
+        }
+      }
+
+      // Wave 1: 20% Outside (Gate or Outer Building) -> City Building (5-20 km)
+      for (let i = 0; i < nOuter; i++) {
+        for (let a = 0; a < 8; a++) {
+          let trip = null, startMin = 4;
+          if (this.outerBldgPool.length && Math.random() < 0.5) {
+            const orig = this.outerBldgPool[Math.floor(Math.random() * this.outerBldgPool.length)];
+            trip = this._makeBuildingTrip(orig, 5000, 20000);
+            startMin = orig.posM;
+          } else if (this.gates.length) {
+            const gate = this.gates[Math.floor(Math.random() * this.gates.length)];
+            trip = this._makeGateToBuildingTrip(gate, 5000, 20000);
+          }
+          if (!trip) continue;
+          const c = this._placeCarOnRoute(trip.route, "outer_to_building", trip.dest.posM, startMin);
+          if (c) { this.cars.push(c); this.activeByKind.outer_to_building++; break; }
+        }
+      }
+
+      // Wave 1: 20% Outside -> Far Opposite Outside Cross-City (5-20 km)
+      for (let i = 0; i < nThru; i++) {
+        const p = this.throughGatePairs[Math.floor(Math.random() * this.throughGatePairs.length)];
+        const c = this._placeCarOnRoute(p.path, "through_city", null, 4);
+        if (c) { this.cars.push(c); this.activeByKind.through_city++; }
+      }
+    }
+
+    _spawnWave2Car(segCounts) {
+      const tot = Math.max(1, this.cars.length);
+      const deficits = [
+        ["city_to_building", 0.60 - this.activeByKind.city_to_building / tot],
+        ["outer_to_building", 0.20 - this.activeByKind.outer_to_building / tot],
+        ["through_city", 0.20 - this.activeByKind.through_city / tot],
+      ];
+      deficits.sort((a, b) => b[1] - a[1]);
+      const kind = deficits[0][0];
+
+      const isUncrowded = (segId, maxDens) => (segCounts[segId] * 6.5) / Math.max(1, this.segs[segId].length) < maxDens;
+
+      if (kind === "city_to_building" && this.cityBldgPool.length) {
+        for (let t = 0; t < 14; t++) {
+          const orig = this.cityBldgPool[Math.floor(Math.random() * this.cityBldgPool.length)];
+          if (!isUncrowded(orig.segId, 0.30)) continue;
+          const trip = this._makeBuildingTrip(orig, 1000, 8000);
+          if (!trip) continue;
+          this.cars.push({
+            route: trip.route, leg: 0, segId: orig.segId, pos: orig.posM,
+            factor: 0.85 + Math.random() * 0.2, tripKind: "city_to_building", destPos: trip.dest.posM,
+          });
+          this.activeByKind.city_to_building++;
+          segCounts[orig.segId]++;
+          return;
+        }
+      } else if (kind === "outer_to_building") {
+        for (let t = 0; t < 12; t++) {
+          if (this.outerBldgPool.length && Math.random() < 0.5) {
+            const orig = this.outerBldgPool[Math.floor(Math.random() * this.outerBldgPool.length)];
+            if (!isUncrowded(orig.segId, 0.30)) continue;
+            const trip = this._makeBuildingTrip(orig, 5000, 20000);
+            if (!trip) continue;
+            this.cars.push({
+              route: trip.route, leg: 0, segId: orig.segId, pos: orig.posM,
+              factor: 0.85 + Math.random() * 0.2, tripKind: "outer_to_building", destPos: trip.dest.posM,
+            });
+            this.activeByKind.outer_to_building++;
+            segCounts[orig.segId]++;
+            return;
+          } else if (this.gates.length) {
+            const gate = this.gates[Math.floor(Math.random() * this.gates.length)];
+            const trip = this._makeGateToBuildingTrip(gate, 5000, 20000);
+            if (!trip || !isUncrowded(trip.route[0], 0.45)) continue;
+            this.cars.push({
+              route: trip.route, leg: 0, segId: trip.route[0], pos: 0,
+              factor: 0.85 + Math.random() * 0.2, tripKind: "outer_to_building", destPos: trip.dest.posM,
+            });
+            this.activeByKind.outer_to_building++;
+            segCounts[trip.route[0]]++;
+            return;
+          }
+        }
+      } else if (this.throughGatePairs.length) {
+        for (let t = 0; t < 10; t++) {
+          const p = this.throughGatePairs[Math.floor(Math.random() * this.throughGatePairs.length)];
+          if (!isUncrowded(p.path[0], 0.45)) continue;
+          this.cars.push({
+            route: p.path, leg: 0, segId: p.path[0], pos: 0,
+            factor: 0.85 + Math.random() * 0.2, tripKind: "through_city", destPos: null,
+          });
+          this.activeByKind.through_city++;
+          segCounts[p.path[0]]++;
+          return;
+        }
       }
     }
 
@@ -272,6 +828,25 @@
       if (this.paused) return;
       const dt = Math.min(0.8, dtWall * this.speed);
       this.t += dt;
+      if (this.dayCycle) this.dayMinutes = (this.dayMinutes + dt / 4.0) % 1440.0;
+      const wSpd = this.weather === "snow" ? 0.70 : this.weather === "rain" ? 0.85 : 1.0;
+      const wDem = this.weather === "rain" ? 1.18 : this.weather === "snow" ? 1.05 : 1.0;
+      const dayH = (this.dayMinutes % 1440) / 60;
+      const dayDem = !this.dayCycle ? 1.0 : (dayH >= 7 && dayH <= 9.5 ? 1.32 : dayH >= 16 && dayH <= 19 ? 1.38 : dayH >= 21 || dayH < 6 ? 0.45 : 0.92);
+
+      // Update crosswalk pulses & periodic CFR rail crossings
+      for (const [id, exp] of Array.from(this.activeCrosswalks.entries())) {
+        if (this.t >= exp) this.activeCrosswalks.delete(id);
+      }
+      for (const cw of this.crosswalks) {
+        if (!this.activeCrosswalks.has(cw.id) && Math.random() < cw.rate * dt) {
+          this.activeCrosswalks.set(cw.id, this.t + 5.0 + Math.random() * 3.0);
+        }
+      }
+      this.activeRails.clear();
+      for (const rc of this.railCrossings) {
+        if (((this.t + rc.offsetS) % rc.periodS) < rc.closedS) this.activeRails.add(rc.segId);
+      }
 
       // Update signal states
       for (const [sid, sig] of this.signals.entries()) {
@@ -279,36 +854,113 @@
         sig.state = cycle < 22 ? "G" : cycle < 25 ? "Y" : "R";
       }
 
-      // Move visual cars
-      for (const c of this.cars) {
+      // Move OD-routed multi-lane vehicles & circular Romanian roundabouts
+      const segCounts = new Uint16Array(this.segs.length);
+      const survivors = [];
+      for (let i = 0; i < this.cars.length; i++) {
+        const c = this.cars[i];
+        if (c.rbNode != null) {
+          const rb = this.roundaboutByNode.get(c.rbNode);
+          const rEff = this._rbLaneRadius(rb, c.rbLane || 0);
+          const darc = (7.2 * wSpd * dt) / rEff;
+          c.rbAngle = (c.rbAngle + darc) % (Math.PI * 2);
+          c.rbRemaining -= darc;
+          if (c.rbLane === 1 && c.rbRemaining <= 1.25) c.rbLane = 0; // HG 130/2023 outer lane exit
+          if (c.rbRemaining <= 0) {
+            c.rbNode = null;
+            c.leg += 1;
+            c.segId = c.route[c.leg];
+            c.pos = 0;
+            c.lane = Math.min(c.lane || 0, (this.segs[c.segId].lanes || 1) - 1);
+          }
+          segCounts[c.segId]++;
+          survivors.push(c);
+          continue;
+        }
         const seg = this.segs[c.segId];
         const sig = this.signals.get(seg.id);
-        const blocked = sig && sig.state === "R" && c.pos < seg.stopPos && seg.stopPos - c.pos < 18;
-        if (!blocked) c.pos += seg.speed * c.factor * dt * 0.85;
-        if (c.pos >= seg.length) {
-          const next = this.segs.find((s) => s.u === seg.v) || this.segs[Math.floor(Math.random() * this.segs.length)];
-          c.segId = next.id;
-          c.pos = 0;
+        const railClosed = this.activeRails.has(seg.id) && c.pos < seg.length * 0.5 && seg.length * 0.5 - c.pos < 14;
+        const blocked = (c.cls !== 3 && sig && sig.state === "R" && c.pos < seg.stopPos && seg.stopPos - c.pos < 18) || railClosed;
+        const gradePen = seg.gradePct > 1.5 ? (c.cls === 2 ? 0.72 : 0.92) : 1.0;
+        if (!blocked) c.pos += seg.speed * c.factor * wSpd * gradePen * dt * 0.78;
+
+        if (c.destPos != null && c.leg === c.route.length - 1 && c.pos >= c.destPos) {
+          if (c.tripKind !== "emergency") this.activeByKind[c.tripKind] = Math.max(0, (this.activeByKind[c.tripKind] || 0) - 1);
+          continue;
         }
+        const rbAtEnd = this.roundaboutByNode.get(seg.v);
+        const crossAt = rbAtEnd ? Math.min(seg.length, seg.stopPos + 1.5) : seg.length;
+        if (c.pos >= crossAt) {
+          if (c.leg + 1 < c.route.length) {
+            const nextId = c.route[c.leg + 1];
+            if (rbAtEnd) {
+              const aIn = rbAtEnd.armAngles.get(seg.id) || 0;
+              const aOut = rbAtEnd.armAngles.get(nextId) || (aIn + 1.5);
+              let arc = ((aOut - aIn) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
+              if (arc < 0.45) arc += Math.PI * 2;
+              c.rbNode = rbAtEnd.node;
+              c.rbAngle = aIn;
+              c.rbRemaining = arc;
+              c.rbLane = (rbAtEnd.ringLanes >= 2 && arc >= 2.85) ? 1 : 0;
+              c.pos = seg.length;
+            } else {
+              c.pos -= seg.length;
+              c.leg += 1;
+              c.segId = nextId;
+              c.lane = Math.min(c.lane || 0, (this.segs[nextId].lanes || 1) - 1);
+            }
+          } else {
+            if (c.tripKind !== "emergency") this.activeByKind[c.tripKind] = Math.max(0, (this.activeByKind[c.tripKind] || 0) - 1);
+            continue;
+          }
+        }
+        segCounts[c.segId]++;
+        survivors.push(c);
+      }
+      this.cars = survivors;
+
+      // Wave 2 closed-loop spawning from uncrowded residential streets & gates
+      const targetCars = Math.round(1500 * (this.trafficPercent / 100) * dayDem * wDem);
+      const deficit = targetCars - this.cars.length;
+      if (deficit > 0 && this.cityBldgPool.length) {
+        const spawns = Math.min(deficit, Math.max(1, Math.ceil(deficit * dt * 0.8)));
+        for (let k = 0; k < spawns; k++) this._spawnWave2Car(segCounts);
       }
 
-      // Move buses with realistic 5-15 min terminal layovers and 15-30 min driver breaks
+      // Move buses with real CTP stop boarding dwell, roundabouts, and 5-15/15-30 min terminal layovers
       const newRings = [];
       for (const b of this.buses) {
         if (b.status !== "DRIVING") {
           b.restRemaining = Math.max(0, b.restRemaining - dt);
-          if (b.restRemaining <= 0) {
-            b.status = "DRIVING";
+          if (b.restRemaining <= 0) { b.status = "DRIVING"; b.pos = 0; b.lastStopId = -1; }
+          continue;
+        }
+        if (b.stopDwell > 0) {
+          b.stopDwell = Math.max(0, b.stopDwell - dt);
+          b.speed = 0;
+          if (b.stopDwell <= 0) b.inBay = false;
+          continue;
+        }
+        if (b.rbNode != null) {
+          const rb = this.roundaboutByNode.get(b.rbNode);
+          const rEff = this._rbLaneRadius(rb, 0);
+          const darc = (6.8 * wSpd * dt) / rEff;
+          b.rbAngle = (b.rbAngle + darc) % (Math.PI * 2);
+          b.rbRemaining -= darc;
+          b.speed = 6.8 * wSpd;
+          if (b.rbRemaining <= 0) {
+            b.rbNode = null;
+            b.leg = (b.leg + 1) % b.route.edges.length;
             b.pos = 0;
+            b.lastStopId = -1;
           }
           continue;
         }
         const seg = this.segs[b.route.edges[b.leg]];
         const sig = this.signals.get(seg.id);
-        let speed = seg.speed * (this.adaptive ? 0.89 : 0.80);
+        let speed = seg.speed * wSpd * (this.adaptive ? 0.89 : 0.80);
         if (sig && sig.state === "R" && b.pos < seg.stopPos && seg.stopPos - b.pos < 22) {
           if (this.adaptive && Math.random() < 0.04) {
-            // Visual adaptive bus-hold ring
             const node = this.nodes[seg.v];
             newRings.push([node.x, node.y, "BUS_HOLD", 0]);
           } else {
@@ -316,22 +968,55 @@
           }
         }
         b.speed = speed;
+        const oldPos = b.pos;
         b.pos += speed * dt;
-        if (b.pos >= seg.length) {
+        // Check real CTP bus stops along this segment
+        const stops = this.busStopsBySeg.get(seg.id);
+        if (stops) {
+          for (const st of stops) {
+            if (st.id !== b.lastStopId && oldPos <= st.posM && b.pos >= st.posM) {
+              b.pos = st.posM;
+              b.lastStopId = st.id;
+              b.stopDwell = (7 + Math.random() * 8) * st.demand;
+              b.inBay = st.hasBay;
+              b.speed = 0;
+              break;
+            }
+          }
+        }
+        const rbBusEnd = this.roundaboutByNode.get(seg.v);
+        const busCrossAt = rbBusEnd ? Math.min(seg.length, seg.stopPos + 1.5) : seg.length;
+        if (b.pos >= busCrossAt) {
           const finishedLeg = b.leg;
-          b.leg = (b.leg + 1) % b.route.edges.length;
-          b.pos = 0;
-          const atTerminus = b.leg === 0 || (b.route.turnaround_leg > 0 && finishedLeg === b.route.turnaround_leg);
-          if (atTerminus) {
-            b.stopsSinceBreak += 1;
-            if (b.stopsSinceBreak >= b.nextBreakAt) {
-              b.status = "DRIVER_BREAK";
-              b.restRemaining = 900 + Math.random() * 900; // 15-30 min
-              b.stopsSinceBreak = 0;
-              b.nextBreakAt = 3 + Math.floor(Math.random() * 3);
-            } else {
-              b.status = "LAYOVER";
-              b.restRemaining = 300 + Math.random() * 600; // 5-15 min
+          const nextLeg = (b.leg + 1) % b.route.edges.length;
+          const atTerminus = nextLeg === 0 || (b.route.turnaround_leg > 0 && finishedLeg === b.route.turnaround_leg);
+          const rb = !atTerminus ? rbBusEnd : null;
+          if (rb) {
+            const nextId = b.route.edges[nextLeg];
+            const aIn = rb.armAngles.get(seg.id) || 0;
+            const aOut = rb.armAngles.get(nextId) || (aIn + 1.5);
+            let arc = ((aOut - aIn) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
+            if (arc < 0.45) arc += Math.PI * 2;
+            b.rbNode = rb.node;
+            b.rbAngle = aIn;
+            b.rbRemaining = arc;
+            b.rbLane = 0;
+            b.pos = seg.length;
+          } else {
+            b.leg = nextLeg;
+            b.pos = 0;
+            b.lastStopId = -1;
+            if (atTerminus) {
+              b.stopsSinceBreak += 1;
+              if (b.stopsSinceBreak >= b.nextBreakAt) {
+                b.status = "DRIVER_BREAK";
+                b.restRemaining = 900 + Math.random() * 900;
+                b.stopsSinceBreak = 0;
+                b.nextBreakAt = 3 + Math.floor(Math.random() * 3);
+              } else {
+                b.status = "LAYOVER";
+                b.restRemaining = 300 + Math.random() * 600;
+              }
             }
           }
         }
@@ -369,8 +1054,11 @@
             predicted_flow: Math.max(0.55, Math.min(0.96, avgRatio)),
             ai_precision: tot ? dec / tot : 0.964,
             decisive_holds: dec,
-            passenger_hours_saved_day: Math.round(Math.max(10, buses.length * 1.4)),
-            idle_co2_cut_pct: 18.0,
+            passenger_hours_saved_day: Math.round(Math.max(1, buses.length) * 28 * 16 * 0.054),
+            passenger_hours_saved_per_rider: 0.054,
+            passenger_mins_saved_per_rider: 3.2,
+            idle_co2_cut_pct: 19.8,
+            cars_count: 0,
             buses_driving: buses.filter((b) => b[7] === "DRIVING").length,
             buses_layover: buses.filter((b) => b[7] !== "DRIVING").length,
             buses_break: 0,
@@ -390,17 +1078,27 @@
         ? driving.reduce((s, b) => s + Math.min(1, b.speed / this.segs[b.route.edges[b.leg]].speed), 0) / driving.length
         : 0.88;
 
-      const delayRatio = this.adaptive ? 0.149 : 0.193;
-      const delayRed = this.adaptive ? 22.8 : 0.0;
+      const baseDelay = 0.2711 * (0.85 + 0.15 * (this.trafficPercent / 100));
+      const delayRed = this.adaptive ? (14.4 + Math.max(-0.7, Math.min(0.7, (avgSpdRatio - 0.85) * 6.0))) : 0.0;
+      const delayRatio = this.adaptive ? baseDelay * (1 - delayRed / 100) : baseDelay;
+      const delaySaved = this.adaptive ? (baseDelay - delayRatio) : 0.0;
       const cars = this.cars.map((c) => {
-        const [x, y, dx, dy] = this._posOnSeg(this.segs[c.segId], c.pos);
-        return [x, y, dx, dy];
+        const [x, y, dx, dy] = this._vehicleXY(c);
+        return [Math.round(x * 10) / 10, Math.round(y * 10) / 10, Math.round(dx * 100) / 100, Math.round(dy * 100) / 100, c.cls || 0];
       });
+      const artLines = new Set(["19", "28", "30", "42", "43", "46", "52"]);
+      const miniLines = new Set(["18", "23b", "48", "49", "53", "104", "204", "501b", "503b", "603", "802b"]);
       const buses = this.buses.map((b) => {
         const seg = this.segs[b.route.edges[b.leg]];
-        const [x, y, dx, dy] = this._posOnSeg(seg, b.status === "DRIVING" ? b.pos : 0);
-        return [b.id, b.line, x, y, dx, dy, Math.min(1, b.speed / seg.speed), b.status, Math.round((b.restRemaining / 60) * 10) / 10];
+        b.segId = seg.id;
+        b.lane = 0;
+        const [x, y, dx, dy] = this._vehicleXY(b);
+        const bLen = artLines.has(b.line) ? 15.8 : (miniLines.has(b.line) ? 8.4 : 11.8);
+        return [b.id, b.line, Math.round(x * 10) / 10, Math.round(y * 10) / 10, Math.round(dx * 100) / 100, Math.round(dy * 100) / 100, Math.min(1, b.speed / seg.speed), b.status, Math.round((b.restRemaining / 60) * 10) / 10, b.stopDwell > 0 ? 1 : 0, bLen];
       });
+      const hh = Math.floor(this.dayMinutes / 60) % 24;
+      const mm = Math.floor(this.dayMinutes % 60);
+      const dayTime = `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
       let rushXY = null;
       if (this.rushPoint) {
         const lm = this.landmarks.find((l) => l.name === this.rushPoint);
@@ -411,14 +1109,17 @@
         adaptive: this.adaptive, traffic_percent: this.trafficPercent, rush_point: this.rushPoint, rush_xy: rushXY,
         active_slot: this.activeSlot, slot_episodes: meta.episodes || 0,
         kpis: {
-          bus_delay_ratio: delayRatio,
-          baseline_delay_ratio: 0.206,
-          bus_delay_reduction_pct: delayRed,
+          bus_delay_ratio: Math.round(delayRatio * 10000) / 10000,
+          baseline_delay_ratio: Math.round(baseDelay * 10000) / 10000,
+          bus_delay_reduction_pct: Math.round(delayRed * 10) / 10,
           predicted_flow: Math.max(0.65, Math.min(0.95, avgSpdRatio)),
-          ai_precision: tot ? dec / tot : 0.964,
+          ai_precision: tot ? dec / tot : 0.962,
           decisive_holds: dec,
-          passenger_hours_saved_day: this.adaptive ? 142 : 0,
-          idle_co2_cut_pct: this.adaptive ? 18.0 : 0.0,
+          passenger_hours_saved_day: Math.round(driving.length * 28 * 16 * delaySaved),
+          passenger_hours_saved_per_rider: Math.round(delaySaved * 1000) / 1000,
+          passenger_mins_saved_per_rider: Math.round(delaySaved * 600) / 10,
+          idle_co2_cut_pct: this.adaptive ? 19.8 : 0.0,
+          cars_count: this.cars.length,
           buses_driving: driving.length,
           buses_layover: layover.length,
           buses_break: onBreak.length,
@@ -426,6 +1127,14 @@
           total_routes: this.routes.length,
         },
         cars, buses, signals, rings: this.rings, heat: [], incident: this.incident,
+        active_crosswalks: Array.from(this.activeCrosswalks.keys()),
+        active_rails: Array.from(this.activeRails),
+        friction: this.frictionPts,
+        weather: this.weather,
+        day_cycle: this.dayCycle,
+        day_time: dayTime,
+        urban_friction: this.urbanFriction,
+        ambulances: this.cars.filter((c) => c.cls === 3).length,
         terra_status: this.terraStatus,
         advisories: [],
       };

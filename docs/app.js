@@ -14,6 +14,8 @@
     frame: null,
     showHeat: false,
     showRoutes: true,
+    showCars: true,
+    showBuildings: true,
     drawerCollapsed: false,
     camera: { cx: 0, cy: 0, scale: 0.14 },
     dragging: false,
@@ -98,13 +100,21 @@
     else if (payload.cmd === "set_adaptive") eng.adaptive = !!payload.adaptive;
     else if (payload.cmd === "set_paused") eng.paused = !!payload.paused;
     else if (payload.cmd === "set_speed") eng.speed = payload.speed;
-    else if (payload.cmd === "set_traffic") { eng.trafficPercent = payload.percent; eng._spawnFleet(); eng._spawnCars(280); }
+    else if (payload.cmd === "set_traffic") { eng.trafficPercent = payload.percent; eng._spawnCars(1500); }
     else if (payload.cmd === "set_rush") eng.rushPoint = payload.rush_point || null;
     else if (payload.cmd === "trigger_incident") {
       const lm = eng.landmarks[Math.floor(Math.random() * eng.landmarks.length)];
       eng.incident = lm ? [lm.x, lm.y] : [0, 0];
+    } else if (payload.cmd === "set_weather") {
+      eng.setWeather(payload.weather);
+    } else if (payload.cmd === "set_day_cycle") {
+      eng.setDayCycle(payload.enabled);
+    } else if (payload.cmd === "set_urban_friction") {
+      eng.setUrbanFriction(payload.enabled);
+    } else if (payload.cmd === "dispatch_ambulance") {
+      eng.dispatchAmbulance();
     } else if (payload.cmd === "reset_sim") {
-      eng.t = 0; eng.incident = null; eng._spawnFleet(); eng._spawnCars(280);
+      eng.t = 0; eng.incident = null; eng.ambulances = []; eng._spawnFleet(); eng._spawnCars(1500);
     }
     state.frame = eng.getFrame();
     updateUI(state.frame);
@@ -154,9 +164,12 @@
     $("terraControls").classList.toggle("hidden", !isTerra);
 
     const k = f.kpis;
+    const carsTxt = k.cars_count != null ? ` · ${k.cars_count.toLocaleString()} Vehicles` : "";
+    const clockTxt = f.day_cycle && f.day_time ? ` · ${f.day_time}` : "";
+    const weatherTxt = f.weather && f.weather !== "clear" ? ` · ${f.weather === "rain" ? "Rain" : "Snow"}` : "";
     $("mapClockText").textContent = isTerra
       ? `Terra (Real) · ${k.total_buses} Live CTP Buses · Tranzy API`
-      : `Aether (Simulation) · t = ${f.t.toFixed(1)}s · ${k.total_routes} CTP Lines`;
+      : `Aether (Simulation) · t = ${f.t.toFixed(1)}s${clockTxt}${weatherTxt} · ${k.total_routes} Lines${carsTxt}`;
 
     // Status pill
     const badge = $("statusBadge");
@@ -176,9 +189,6 @@
     $("kpiDelayReduction").textContent = isTerra
       ? `-${Math.abs(redPct).toFixed(1)}%`
       : (f.adaptive ? `-${Math.max(0, redPct).toFixed(1)}%` : "0.0%");
-    $("kpiDelaySub").textContent = isTerra
-      ? `Est. corridor gain on live CTP fleet`
-      : `${(k.bus_delay_ratio * 100).toFixed(1)}% vs ${(k.baseline_delay_ratio * 100).toFixed(1)}% Fixed Baseline`;
 
     // Secondary KPIs (Strictly honest bus-inferred Predicted Flow!)
     $("kpiPredictedFlow").textContent = `${Math.round(k.predicted_flow * 100)}%`;
@@ -188,7 +198,10 @@
     // Municipal Value Bars
     $("barAdaptive").style.height = f.adaptive ? `${Math.min(95, Math.max(48, 60 + Math.abs(redPct) * 1.1))}%` : "54%";
     $("barFixed").style.height = "54%";
-    $("kpiPaxHours").textContent = `~${k.passenger_hours_saved_day} hrs/day`;
+    $("kpiPaxHours").textContent = `~${Number(k.passenger_hours_saved_day || 0).toLocaleString()} hrs/day`;
+    const perHrs = Number(k.passenger_hours_saved_per_rider || 0).toFixed(3);
+    const perMin = Number(k.passenger_mins_saved_per_rider || 0).toFixed(1);
+    $("kpiPaxPerRider").innerHTML = `~${perHrs} hrs/day <small>(${perMin} min)</small>`;
     $("kpiCo2").textContent = `-${Math.round(k.idle_co2_cut_pct)}%`;
 
     // Fleet Breakdown (Driving / Layover / Driver Break)
@@ -206,8 +219,17 @@
     $("btnPlayPause").textContent = f.paused ? "Resume" : "Pause";
     $("btnSpeed").textContent = `${f.speed}× Speed`;
     $("trafficVal").textContent = `${Math.round(f.traffic_percent)}%`;
-    if (document.activeElement !== $("trafficSlider")) $("trafficSlider").value = Math.min(500, Math.round(f.traffic_percent));
+    if (document.activeElement !== $("trafficSlider")) $("trafficSlider").value = Math.min(300, Math.round(f.traffic_percent));
     if (document.activeElement !== $("rushSelect")) $("rushSelect").value = f.rush_point || "";
+
+    // Realism controls sync (Weather, Day Cycle, Urban Friction)
+    const curW = f.weather || "clear";
+    $("btnWeatherClear").classList.toggle("active", curW === "clear");
+    $("btnWeatherRain").classList.toggle("active", curW === "rain");
+    $("btnWeatherSnow").classList.toggle("active", curW === "snow");
+    $("btnDayCycle").classList.toggle("active", !!f.day_cycle);
+    $("btnDayCycle").textContent = f.day_cycle && f.day_time ? `Clock ${f.day_time}` : "Day Cycle";
+    $("btnFriction").classList.toggle("active", !!f.urban_friction);
 
     // Terra status & advisories
     if (isTerra) {
@@ -235,7 +257,8 @@
   function drawMap() {
     const rect = canvas.parentElement.getBoundingClientRect();
     const W = rect.width, H = rect.height;
-    ctx.fillStyle = "#f2f6f3"; // Pearl White canvas
+    const weather = (state.frame && state.frame.weather) || "clear";
+    ctx.fillStyle = weather === "snow" ? "#eef4f7" : weather === "rain" ? "#e9f0ed" : "#f2f6f3"; // Pearl White canvas
     ctx.fillRect(0, 0, W, H);
 
     if (!state.map) return;
@@ -251,22 +274,233 @@
       for (let y = oy % gridStep; y < H; y += gridStep) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
     }
 
-    // 1. Road casings (Bone/Sage outline) & Snow White surfaces
+    // 0.5. Residential Buildings (Apartment Blocks & Detached Houses — civic architectural layer)
+    let hoveredBuilding = null;
+    if (state.showBuildings && state.map.buildings && state.map.buildings.length) {
+      const detailedApt = sc >= 0.22;
+      const detailedHouse = sc >= 0.28;
+      const checkHover = sc >= 0.18 && state.hoverMouse.x >= 0;
+      for (const b of state.map.buildings) {
+        const [bid, isApt, isCity, bx, by, bw, bd, ang] = b;
+        const [sx, sy] = toScreen(bx, by);
+        if (sx < -36 || sx > W + 36 || sy < -36 || sy > H + 36) continue;
+
+        const sw = Math.max(isApt ? 3.2 : 2.2, bw * sc);
+        const sd = Math.max(isApt ? 2.0 : 1.8, bd * sc);
+
+        if (checkHover && !hoveredBuilding) {
+          const hitR = Math.max(7, Math.max(sw, sd) * 0.55);
+          if (Math.hypot(sx - state.hoverMouse.x, sy - state.hoverMouse.y) <= hitR) {
+            hoveredBuilding = b;
+          }
+        }
+
+        ctx.save();
+        ctx.translate(sx, sy);
+        ctx.rotate(-ang); // canvas Y points down, world Y points north
+        if (isApt) {
+          // Apartment block: crisp Bone/Sage civic rectangle + subtle roof-deck inset
+          ctx.fillStyle = "#d5e4da";
+          ctx.strokeStyle = "rgba(20, 83, 45, 0.30)";
+          ctx.lineWidth = sc >= 0.35 ? 1.15 : 0.75;
+          ctx.fillRect(-sw / 2, -sd / 2, sw, sd);
+          ctx.strokeRect(-sw / 2, -sd / 2, sw, sd);
+          if (detailedApt && sw > 7 && sd > 4.5) {
+            ctx.fillStyle = "#eaf3ed";
+            ctx.fillRect(-sw * 0.34, -sd * 0.28, sw * 0.68, sd * 0.56);
+          }
+        } else {
+          // Detached house: warm Ivory footprint + pitched-roof ridge line on zoom
+          ctx.fillStyle = "#e8ece0";
+          ctx.strokeStyle = "rgba(22, 101, 52, 0.34)";
+          ctx.lineWidth = sc >= 0.35 ? 1.05 : 0.7;
+          ctx.fillRect(-sw / 2, -sd / 2, sw, sd);
+          ctx.strokeRect(-sw / 2, -sd / 2, sw, sd);
+          if (detailedHouse && sw > 4.5) {
+            ctx.beginPath();
+            ctx.moveTo(-sw * 0.38, 0);
+            ctx.lineTo(sw * 0.38, 0);
+            ctx.strokeStyle = "rgba(20, 83, 45, 0.32)";
+            ctx.lineWidth = 0.9;
+            ctx.stroke();
+          }
+        }
+        ctx.restore();
+      }
+    }
+
+    // 1. Multi-Lane Road Casings (Bone/Sage outline), Snow White surfaces & Lane Dividers
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
     const exag = 1.0 + 1.05 * Math.max(0, Math.min(1, (0.55 - sc) / 0.45));
     for (const pass of [0, 1]) {
       for (const road of state.map.roads) {
-        const baseW = road.hwy.includes("primary") ? 11 : road.hwy.includes("secondary") ? 8.5 : 6.2;
+        const lanesDir = road.lanes || 1;
+        const totalLanes = road.total_lanes || (road.oneway ? lanesDir : lanesDir * 2);
+        const baseW = Math.max(
+          road.hwy.includes("primary") ? 10.5 : road.hwy.includes("secondary") ? 8.2 : 6.0,
+          totalLanes * 3.35 + (road.oneway ? 1.5 : 2.2)
+        );
         const w = Math.max(2.2, exag * baseW * sc);
         ctx.beginPath();
         road.pts.forEach(([x, y], idx) => {
           const [sx, sy] = toScreen(x, y);
           if (idx === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
         });
-        ctx.strokeStyle = pass === 0 ? "#d6e0d9" : "#ffffff";
-        ctx.lineWidth = pass === 0 ? w + 2.2 : w;
+        ctx.strokeStyle = pass === 0 ? "#cfdbd3" : "#ffffff";
+        ctx.lineWidth = pass === 0 ? w + 2.4 : w;
         ctx.stroke();
+      }
+    }
+
+    // 1.2. Crisp Center Medians & Dashed Multi-Lane Markings (zoomed in)
+    if (sc >= 0.24) {
+      for (const road of state.map.roads) {
+        const lanesDir = road.lanes || 1;
+        if (lanesDir < 2 && road.oneway) continue;
+        // Center divider separating opposing directions on 2-way roads
+        if (!road.oneway) {
+          ctx.beginPath();
+          road.pts.forEach(([x, y], idx) => {
+            const [sx, sy] = toScreen(x, y);
+            if (idx === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+          });
+          ctx.setLineDash(lanesDir >= 2 ? [] : [4, 5]);
+          ctx.strokeStyle = lanesDir >= 2 ? "rgba(20, 83, 45, 0.22)" : "rgba(20, 83, 45, 0.12)";
+          ctx.lineWidth = lanesDir >= 2 ? Math.max(1.0, 1.3 * sc) : 0.85;
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+        // Subtle dashed band dividers inside 2-lane and 3-lane directions
+        if (lanesDir >= 2 && sc >= 0.32 && road.pts.length >= 2) {
+          ctx.setLineDash([5, 6]);
+          ctx.strokeStyle = "rgba(100, 125, 110, 0.28)";
+          ctx.lineWidth = 0.85;
+          const offsets = road.oneway
+            ? (lanesDir === 2 ? [0] : [-1.55, 1.55])
+            : (lanesDir === 2 ? [3.45, -3.45] : [3.45, 6.55, -3.45, -6.55]);
+          for (const off of offsets) {
+            ctx.beginPath();
+            for (let i = 0; i < road.pts.length; i++) {
+              const p = road.pts[i];
+              const q = road.pts[Math.min(road.pts.length - 1, i + 1)];
+              const prev = road.pts[Math.max(0, i - 1)];
+              let dx = q[0] - prev[0], dy = q[1] - prev[1];
+              const mag = Math.hypot(dx, dy) || 1;
+              dx /= mag; dy /= mag;
+              const [sx, sy] = toScreen(p[0] + dy * off, p[1] - dx * off);
+              if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+            }
+            ctx.stroke();
+          }
+          ctx.setLineDash([]);
+        }
+      }
+    }
+
+    // 1.5. Real Romanian Circular Roundabouts (Snow White ring + dashed HG 130/2023 lane + Forest Green island)
+    let hoveredRoundabout = null;
+    if (state.map.roundabouts && state.map.roundabouts.length) {
+      for (const rb of state.map.roundabouts) {
+        const [nid, name, rx, ry, radM, ringLanes, isSig] = rb;
+        const [sx, sy] = toScreen(rx, ry);
+        if (sx < -60 || sx > W + 60 || sy < -60 || sy > H + 60) continue;
+        const outerR = Math.max(7.5, (radM + 2.5) * sc);
+        const ringW = Math.max(3.5, (ringLanes >= 2 ? 7.2 : 4.6) * sc);
+        const islandR = Math.max(2.6, outerR - ringW);
+
+        if (state.hoverMouse.x >= 0 && Math.hypot(sx - state.hoverMouse.x, sy - state.hoverMouse.y) <= outerR + 5) {
+          hoveredRoundabout = rb;
+        }
+
+        // Outer road casing & circular asphalt ring
+        ctx.beginPath();
+        ctx.arc(sx, sy, outerR, 0, Math.PI * 2);
+        ctx.fillStyle = "#ffffff";
+        ctx.fill();
+        ctx.strokeStyle = isSig ? "rgba(20, 83, 45, 0.42)" : "#b9cbc0";
+        ctx.lineWidth = 1.6;
+        ctx.stroke();
+
+        // Dashed concentric ring lane divider for 2-lane roundabouts (HG 130/2023)
+        if (ringLanes >= 2 && sc >= 0.22) {
+          ctx.beginPath();
+          ctx.arc(sx, sy, islandR + ringW * 0.5, 0, Math.PI * 2);
+          ctx.setLineDash([4, 4]);
+          ctx.strokeStyle = "rgba(100, 125, 110, 0.38)";
+          ctx.lineWidth = 0.9;
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+
+        // Landscaped civic Forest/Mint Green center island
+        ctx.beginPath();
+        ctx.arc(sx, sy, islandR, 0, Math.PI * 2);
+        ctx.fillStyle = "#c9e6d2";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(20, 83, 45, 0.35)";
+        ctx.lineWidth = 1.1;
+        ctx.stroke();
+      }
+    }
+
+    // 1.7. Real CTP Bus Stops & Zebra Crosswalks & CFR Rail Crossings (zoomed in)
+    if (sc >= 0.20 && state.map.bus_stops) {
+      ctx.fillStyle = "#16a34a";
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 1.0;
+      for (const st of state.map.bus_stops) {
+        const [, bx, by, hasBay] = st;
+        const [sx, sy] = toScreen(bx, by);
+        if (sx < -12 || sx > W + 12 || sy < -12 || sy > H + 12) continue;
+        ctx.beginPath();
+        ctx.arc(sx, sy, hasBay ? 2.7 : 2.1, 0, Math.PI * 2);
+        ctx.fill();
+        if (sc >= 0.35) ctx.stroke();
+      }
+    }
+    const f = state.frame;
+    const activeCwSet = new Set((f && f.active_crosswalks) || []);
+    if (sc >= 0.18 && state.map.crosswalks) {
+      for (const cw of state.map.crosswalks) {
+        const [cwid, cx, cy, dx, dy, lanes] = cw;
+        const [sx, sy] = toScreen(cx, cy);
+        if (sx < -20 || sx > W + 20 || sy < -20 || sy > H + 20) continue;
+        const active = activeCwSet.has(cwid);
+        const span = Math.max(4.5, (lanes * 3.2 + 2.0) * sc);
+        ctx.save();
+        ctx.translate(sx, sy);
+        ctx.rotate(Math.atan2(-dy, dx));
+        ctx.strokeStyle = active ? "rgba(245, 158, 11, 0.92)" : "rgba(20, 83, 45, 0.26)";
+        ctx.lineWidth = active ? 2.4 : 1.3;
+        ctx.setLineDash([2.2, 2.2]);
+        ctx.beginPath();
+        ctx.moveTo(0, -span);
+        ctx.lineTo(0, span);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+      }
+    }
+    const activeRailSet = new Set((f && f.active_rails) || []);
+    if (state.map.rail_crossings) {
+      for (const rc of state.map.rail_crossings) {
+        const [segId, rx, ry, dx, dy] = rc;
+        const [sx, sy] = toScreen(rx, ry);
+        if (sx < -20 || sx > W + 20 || sy < -20 || sy > H + 20) continue;
+        const closed = activeRailSet.has(segId);
+        if (closed || sc >= 0.20) {
+          ctx.save();
+          ctx.translate(sx, sy);
+          ctx.rotate(Math.atan2(-dy, dx));
+          ctx.strokeStyle = closed ? "#dc2626" : "rgba(71, 85, 105, 0.45)";
+          ctx.lineWidth = closed ? 3.2 : 1.6;
+          ctx.beginPath();
+          ctx.moveTo(0, -9);
+          ctx.lineTo(0, 9);
+          ctx.stroke();
+          ctx.restore();
+        }
       }
     }
 
@@ -290,7 +524,6 @@
       }
     }
 
-    const f = state.frame;
     if (f) {
       // 3. Optional bus-inferred congestion heat overlay
       if (state.showHeat && f.heat) {
@@ -352,18 +585,62 @@
         }
       }
 
-      // 7. Visual Cars (subtle muted sage-slate in Aether)
-      if (f.cars && f.cars.length) {
-        const cl = Math.max(4.5, 4.5 * sc), cw = Math.max(2.6, 2.3 * sc);
-        ctx.fillStyle = "#9fb3a8";
-        for (const [x, y, dx, dy] of f.cars) {
+      // 7. Visual Vehicles by Class (0=car, 1=van, 2=truck, 3=ambulance — physics always active!)
+      if (state.showCars && f.cars && f.cars.length) {
+        const blink = Math.floor(performance.now() / 160) % 2 === 0;
+        for (const c of f.cars) {
+          const [x, y, dx, dy, cls = 0] = c;
           const [sx, sy] = toScreen(x, y);
-          if (sx < -15 || sx > W + 15 || sy < -15 || sy > H + 15) continue;
+          if (sx < -18 || sx > W + 18 || sy < -18 || sy > H + 18) continue;
           ctx.save();
           ctx.translate(sx, sy);
           ctx.rotate(Math.atan2(-dy, dx));
-          ctx.fillRect(-cl / 2, -cw / 2, cl, cw);
+          if (cls === 3) {
+            // Emergency Ambulance: Snow White + red/blue flashing beacon halo!
+            const al = Math.max(7.5, 6.4 * sc), aw = Math.max(3.8, 2.7 * sc);
+            ctx.beginPath();
+            ctx.arc(0, 0, Math.max(7.5, 8.5 * sc), 0, Math.PI * 2);
+            ctx.fillStyle = blink ? "rgba(239, 68, 68, 0.25)" : "rgba(59, 130, 246, 0.25)";
+            ctx.fill();
+            ctx.fillStyle = "#ffffff";
+            ctx.strokeStyle = "#dc2626";
+            ctx.lineWidth = 1.4;
+            ctx.fillRect(-al / 2, -aw / 2, al, aw);
+            ctx.strokeRect(-al / 2, -aw / 2, al, aw);
+            ctx.fillStyle = blink ? "#ef4444" : "#2563eb";
+            ctx.fillRect(-1.5, -aw * 0.35, 3, aw * 0.7);
+          } else if (cls === 2) {
+            // Heavy Truck / TIR
+            const tl = Math.max(8.5, 10.6 * sc), tw = Math.max(3.2, 2.7 * sc);
+            ctx.fillStyle = "#627b6e";
+            ctx.fillRect(-tl / 2, -tw / 2, tl, tw);
+          } else if (cls === 1) {
+            // Delivery Van / SUV
+            const vl = Math.max(5.5, 5.8 * sc), vw = Math.max(2.8, 2.4 * sc);
+            ctx.fillStyle = "#7e998b";
+            ctx.fillRect(-vl / 2, -vw / 2, vl, vw);
+          } else {
+            // Passenger Car
+            const cl = Math.max(4.4, 4.5 * sc), cw = Math.max(2.4, 2.2 * sc);
+            ctx.fillStyle = "#9ab0a4";
+            ctx.fillRect(-cl / 2, -cw / 2, cl, cw);
+          }
           ctx.restore();
+        }
+      }
+
+      // 7.5. Curbside Double-Parked Friction Vans ("5 min pe avarii" blinking amber hazard lights)
+      if (f.friction && f.friction.length) {
+        const haz = Math.floor(performance.now() / 320) % 2 === 0;
+        for (const [fx, fy] of f.friction) {
+          const [sx, sy] = toScreen(fx, fy);
+          if (sx < -15 || sx > W + 15 || sy < -15 || sy > H + 15) continue;
+          ctx.beginPath();
+          ctx.arc(sx, sy, 5.5, 0, Math.PI * 2);
+          ctx.fillStyle = haz ? "rgba(245, 158, 11, 0.32)" : "rgba(245, 158, 11, 0.10)";
+          ctx.fill();
+          ctx.fillStyle = "#d97706";
+          ctx.fillRect(sx - 2.6, sy - 2.6, 5.2, 5.2);
         }
       }
 
@@ -379,13 +656,12 @@
         ctx.stroke();
       }
 
-      // 9. Buses (Kelly/Lime Green for driving, soft Sage circle for terminus Layover / Driver Break!)
+      // 9. Buses (articulated 16m, standard 12m, minibus 8.5m; boarding ring at CTP stops; soft Sage at terminus)
       let hoveredBus = null;
       const chipGrid = new Set();
-      const bl = Math.max(11, 11 * sc), bw = Math.max(5.5, 3.2 * sc);
 
       for (const b of f.buses || []) {
-        const [id, line, x, y, dx, dy, spdRatio, status, restMin] = b;
+        const [id, line, x, y, dx, dy, spdRatio, status, restMin, atStop = 0, bLenM = 11.5] = b;
         const [sx, sy] = toScreen(x, y);
         if (sx < -25 || sx > W + 25 || sy < -25 || sy > H + 25) continue;
 
@@ -394,7 +670,6 @@
         }
 
         if (status !== "DRIVING") {
-          // Resting cleanly in terminus bay
           ctx.beginPath();
           ctx.arc(sx, sy, 5.5, 0, Math.PI * 2);
           ctx.fillStyle = status === "DRIVER_BREAK" ? "#e0f2fe" : "#e6f7d2";
@@ -405,8 +680,19 @@
           continue;
         }
 
-        // Driving bus body
-        const col = spdRatio > 0.65 ? "#16a34a" : spdRatio > 0.3 ? "#84cc16" : "#f59e0b";
+        const bl = Math.max(bLenM >= 14 ? 13.5 : (bLenM <= 9 ? 9.5 : 11), bLenM * sc);
+        const bw = Math.max(5.5, 3.2 * sc);
+
+        if (atStop) {
+          ctx.beginPath();
+          ctx.arc(sx, sy, 9.5, 0, Math.PI * 2);
+          ctx.strokeStyle = "rgba(22, 163, 74, 0.55)";
+          ctx.lineWidth = 1.6;
+          ctx.stroke();
+        }
+
+        // Driving or boarding bus body
+        const col = atStop ? "#15803d" : (spdRatio > 0.65 ? "#16a34a" : spdRatio > 0.3 ? "#84cc16" : "#f59e0b");
         ctx.save();
         ctx.translate(sx, sy);
         ctx.rotate(Math.atan2(-dy, dx));
@@ -419,7 +705,6 @@
         ctx.stroke();
         ctx.restore();
 
-        // Crisp route pill (collision-culled so map stays airy & readable)
         const cell = `${Math.floor(sx / 38)}:${Math.floor(sy / 22)}`;
         if (line && !chipGrid.has(cell)) {
           chipGrid.add(cell);
@@ -434,18 +719,55 @@
         }
       }
 
-      // Hover tooltip
+      // Hover tooltip (bus -> roundabout -> building)
       const tip = $("mapTooltip");
       if (hoveredBus) {
-        const [id, line, , , , , spdRatio, status, restMin] = hoveredBus;
+        const [id, line, , , , , spdRatio, status, restMin, atStop = 0] = hoveredBus;
         tip.classList.remove("hidden");
         tip.style.left = `${state.hoverMouse.x + 14}px`;
         tip.style.top = `${state.hoverMouse.y - 12}px`;
         tip.textContent = status === "DRIVING"
-          ? `Line ${line} (${id}) · Driving · ${Math.round(spdRatio * 50)} km/h`
+          ? (atStop ? `Line ${line} (${id}) · Boarding Passengers at CTP Stop` : `Line ${line} (${id}) · Driving · ${Math.round(spdRatio * 50)} km/h`)
           : `Line ${line} (${id}) · ${status === "DRIVER_BREAK" ? "Driver Break" : "Terminus Layover"} (${restMin}m left)`;
+      } else if (hoveredRoundabout) {
+        const [, rname, , , , rlanes, isSig] = hoveredRoundabout;
+        tip.classList.remove("hidden");
+        tip.style.left = `${state.hoverMouse.x + 14}px`;
+        tip.style.top = `${state.hoverMouse.y - 12}px`;
+        tip.textContent = `${rname} · ${rlanes}-Lane ${isSig ? "Signalized Roundabout" : "Yield-to-Left (HG 130/2023)"}`;
+      } else if (hoveredBuilding) {
+        const [bid, isApt, isCity] = hoveredBuilding;
+        tip.classList.remove("hidden");
+        tip.style.left = `${state.hoverMouse.x + 14}px`;
+        tip.style.top = `${state.hoverMouse.y - 12}px`;
+        tip.textContent = `${isApt ? "Apartment Block" : "House"} #${bid} · ${isCity ? "Iași City Core" : "Metropolitan / Outer"}`;
       } else {
         tip.classList.add("hidden");
+      }
+
+      // 9.5. Subtle Weather Atmospheric Overlay (Rain streaks / Winter snow)
+      if (weather === "rain") {
+        const tms = performance.now() * 0.25;
+        ctx.strokeStyle = "rgba(59, 130, 168, 0.18)";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        for (let i = 0; i < 65; i++) {
+          const rx = ((i * 137 + tms * 0.35) % (W + 40)) - 20;
+          const ry = ((i * 89 + tms * 1.4) % (H + 40)) - 20;
+          ctx.moveTo(rx, ry);
+          ctx.lineTo(rx - 4, ry + 13);
+        }
+        ctx.stroke();
+      } else if (weather === "snow") {
+        const tms = performance.now() * 0.04;
+        ctx.fillStyle = "rgba(255, 255, 255, 0.78)";
+        for (let i = 0; i < 75; i++) {
+          const rx = ((i * 151 + Math.sin(tms * 0.05 + i) * 28) % W + W) % W;
+          const ry = ((i * 97 + tms * 0.9) % H + H) % H;
+          ctx.beginPath();
+          ctx.arc(rx, ry, (i % 2) + 1.4, 0, Math.PI * 2);
+          ctx.fill();
+        }
       }
     }
 
@@ -500,6 +822,86 @@
     $("btnFitMap").onclick = fitMap;
     $("btnHeat").onclick = () => { state.showHeat = !state.showHeat; $("btnHeat").classList.toggle("active", state.showHeat); };
     $("btnRoutes").onclick = () => { state.showRoutes = !state.showRoutes; $("btnRoutes").classList.toggle("active", state.showRoutes); };
+    $("btnShowCars").onclick = () => { state.showCars = !state.showCars; $("btnShowCars").classList.toggle("active", state.showCars); };
+    $("btnBuildings").onclick = () => { state.showBuildings = !state.showBuildings; $("btnBuildings").classList.toggle("active", state.showBuildings); };
+
+    // Compact structured hover tooltips for every Executive Drawer metric
+    const STAT_TIPS = {
+      delay_reduced: {
+        title: "Bus Delay Reduced",
+        what: "Share of transit waiting time eliminated compared to standard fixed traffic-light timers.",
+        how: "Compares live bus travel-time loss against Iași's measured fixed-timer baseline.",
+        impact: "Faster, more punctual CTP schedules without adding new buses or widening roads.",
+      },
+      predicted_flow: {
+        title: "Predicted Traffic Flow",
+        what: "Estimated arterial movement speed across the city (100% = free-flowing traffic).",
+        how: "Inferred strictly from live bus GPS telemetry — Noodle never requires street cameras or car sensors.",
+        impact: "Proves Noodle sees city-wide congestion using only existing transit AVL data.",
+      },
+      ai_precision: {
+        title: "AI Decision Precision",
+        what: "Percentage of green-light holds that were decisive (the bus cleared the junction only thanks to the extra green).",
+        how: "Self-graded after every yellow light using bus odometer history; failed holds lower that junction's trust.",
+        impact: "Prevents wasted green time so side-street car traffic keeps moving smoothly.",
+      },
+      municipal_bars: {
+        title: "Adaptive AI vs. Fixed Baseline",
+        what: "Side-by-side transit efficiency comparison between Noodle AI and traditional fixed timers.",
+        how: "Evaluated on paired identical traffic seeds across all 51 CTP Iași lines.",
+        impact: "Higher bar = smoother corridor flow and lower passenger waiting time.",
+      },
+      pax_total: {
+        title: "All Passengers Saved (City-Wide)",
+        what: "Estimated combined hours returned every day across all CTP Iași bus riders.",
+        how: "Active driving buses × ~28 avg riders × 16 service hrs/day × share of ride time saved.",
+        impact: "Quantifies total daily economic & productivity gain for the entire municipality.",
+      },
+      pax_per_rider: {
+        title: "Time Saved Per Passenger",
+        what: "Average daily hours (and minutes) saved by one regular CTP bus commuter.",
+        how: "Based on an average ~1.0 hr/day round-trip bus commute × measured travel-time reduction.",
+        impact: "Adds up to ~10–20 hours saved per commuter every year — directly boosting ridership.",
+      },
+      co2_cut: {
+        title: "Estimated Idle CO₂ Cut",
+        what: "Projected reduction in stop-and-go bus and corridor idling emissions.",
+        how: "Modeled proportionally from fewer red-light stops and reduced diesel/queue idling.",
+        impact: "Supports EU Green Deal & PMUD Iași sustainable urban mobility targets.",
+      },
+      fleet_status: {
+        title: "CTP Iași Fleet Status (51 Lines)",
+        what: "Real-time breakdown of buses actively driving vs. resting at route termini.",
+        how: "Buses take realistic 5–15 min terminal layovers and 15–30 min driver breaks every 3–5 stops (never despawning).",
+        impact: "Resting buses are excluded from congestion sensors so parked vehicles never trigger false green holds.",
+      },
+      car_traffic_load: {
+        title: "Car Traffic Load (Cars Only)",
+        what: "Scales the volume of private cars in Iași traffic (100% ≈ 1,500 simultaneous moving cars on the arterial core).",
+        how: "Changes only car count & entry rate — the 51-line CTP bus fleet remains fixed to its real schedule.",
+        impact: "Lets you stress-test how Noodle protects buses during light traffic or severe rush hour.",
+      },
+    };
+
+    const tipEl = $("statTooltip");
+    document.querySelectorAll(".tip-target").forEach((el) => {
+      el.addEventListener("mouseenter", () => {
+        const cfg = STAT_TIPS[el.dataset.tip];
+        if (!cfg) return;
+        $("stTitle").textContent = cfg.title;
+        $("stWhat").textContent = cfg.what;
+        $("stHow").textContent = cfg.how;
+        $("stImpact").textContent = cfg.impact;
+        tipEl.classList.remove("hidden");
+        const r = el.getBoundingClientRect();
+        const th = tipEl.offsetHeight || 130;
+        const left = Math.max(12, r.left - 288);
+        const top = Math.max(66, Math.min(window.innerHeight - th - 14, r.top + (r.height - th) / 2));
+        tipEl.style.left = `${left}px`;
+        tipEl.style.top = `${top}px`;
+      });
+      el.addEventListener("mouseleave", () => tipEl.classList.add("hidden"));
+    });
 
     // Collapsible Right Drawer
     const toggleDrawer = () => {
@@ -617,6 +1019,14 @@
     };
     $("btnIncident").onclick = () => sendCmd({ cmd: "trigger_incident" });
     $("btnResetSim").onclick = () => sendCmd({ cmd: "reset_sim" });
+
+    // Realism & Scenarios Controls
+    ["btnWeatherClear", "btnWeatherRain", "btnWeatherSnow"].forEach((id) => {
+      $(id).onclick = () => sendCmd({ cmd: "set_weather", weather: $(id).dataset.weather });
+    });
+    $("btnDayCycle").onclick = () => sendCmd({ cmd: "set_day_cycle", enabled: !(state.frame && state.frame.day_cycle) });
+    $("btnFriction").onclick = () => sendCmd({ cmd: "set_urban_friction", enabled: !(state.frame && state.frame.urban_friction) });
+    $("btnAmbulance").onclick = () => sendCmd({ cmd: "dispatch_ambulance" });
   }
 
   // ==================== BOOTSTRAP (AUTO-DETECT FASTAPI vs GITHUB PAGES) ====================

@@ -26,6 +26,8 @@ class CongestionEstimator:
         self.last_seen = [-math.inf] * n
 
     def on_telemetry(self, tel: BusTelemetry) -> None:
+        if getattr(tel, "at_stop", False):
+            return  # scheduled passenger boarding at a CTP stop is not road congestion
         cfg = self.cfg
         seg = self.net.segments[tel.segment_id]
         pos = seg.stop_pos - tel.dist_to_next_node

@@ -424,7 +424,7 @@ class CityView:
             elif v.kind == "bus":
                 buses.append(v)
             else:
-                x, y, dx, dy = net.position(v.seg, v.pos - v.length / 2)  # one projection serves culling and drawing
+                x, y, dx, dy = sim.model.vehicle_xy(v)  # one projection serves culling and drawing
                 cx, cy = cam.to_screen(x, y)
                 if view.collidepoint(cx, cy):
                     self._draw_body(screen, cx, cy, dx, dy, car_len, car_wid, CAR, CAR_OUTLINE)
@@ -433,7 +433,7 @@ class CityView:
         taken: set[tuple[int, int]] = set()
         cell_w, cell_h = self.CHIP_CELL
         for v in buses:
-            x, y, dx, dy = net.position(v.seg, v.pos - v.length / 2)
+            x, y, dx, dy = sim.model.vehicle_xy(v)
             cx, cy = cam.to_screen(x, y)
             if not view.collidepoint(cx, cy):
                 continue

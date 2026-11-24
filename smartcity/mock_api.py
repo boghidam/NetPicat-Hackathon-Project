@@ -32,6 +32,7 @@ class BusTelemetry:
     delay: float  # accumulated seconds beyond the free-flow schedule
     line: str = ""  # public line number, e.g. "28"
     leg: int = 0  # position along the line's edge list
+    at_stop: bool = False  # True while boarding passengers at a scheduled CTP stop
 
     def format(self) -> str:
         return (
@@ -123,13 +124,14 @@ class BusFleet:
     def _place(self, ref: str, offset: float) -> bool:
         """Put a new bus of this line at `offset` m along its loop, or the closest free spot if that one is taken."""
         route = self.net.route_by_ref[ref]
-        for nudge in self._NUDGES:
-            leg, pos = self._locate(ref, offset + nudge)
-            if self.world.try_place_bus(
-                f"B{self._next_id:02d}", ref, route.edges, leg, pos, turnaround_leg=route.turnaround_leg
-            ):
-                self._next_id += 1
-                return True
+        for extra_shift in (0.0, 220.0, -220.0, 450.0, -450.0):
+            for nudge in self._NUDGES:
+                leg, pos = self._locate(ref, offset + extra_shift + nudge)
+                if self.world.try_place_bus(
+                    f"B{self._next_id:02d}", ref, route.edges, leg, pos, turnaround_leg=route.turnaround_leg
+                ):
+                    self._next_id += 1
+                    return True
         return False
 
     def _locate(self, ref: str, offset: float) -> tuple[int, float]:
@@ -182,10 +184,11 @@ class BusFleet:
             if b.status != "DRIVING":
                 continue
             seg = self.net.segments[b.seg]
-            x, y, _, _ = self.net.position(seg.id, b.pos)
+            x, y, _, _ = self.world.vehicle_xy(b)
+            at_stop = b.stop_dwell > 0.0 or b.in_bus_bay
             rec = BusTelemetry(
                 b.id, now, x, y, seg.id, min(seg.stop_pos, max(0.0, seg.stop_pos - b.pos)), b.v, seg.speed_limit, b.delay,
-                line=b.line or "", leg=b.leg,
+                line=b.line or "", leg=b.leg, at_stop=at_stop,
             )  # fmt: skip
             self.api.publish(rec)
             out.append(rec)

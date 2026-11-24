@@ -81,6 +81,7 @@ class NetworkCoordinator:
         self._neighbours = {node.id: net.neighbours(node.id) for node in net.nodes}
         self._hop2 = self._second_hops()
         self.learner: JunctionLearner | None = None  # set when a learned policy is loaded
+        self.emergency_approaches: set[int] = set()  # approaches with active ambulance requesting preemption
 
     def trust(self, node: int, kind: str) -> float:
         """How much this junction's learned experience scales an extension of this kind (1 without learning)."""
@@ -148,11 +149,15 @@ class NetworkCoordinator:
         for seg in net.segments:
             sid = seg.id
             worst, worst_id = 0.0, -1
-            for target, _share in net.turn_targets(sid):
+            floor = max(cfg.rho_gate, self.load[sid])
+            weighted_excess = 0.0
+            for target, share in net.turn_targets(sid):
                 # releasing onto an edge also loads the junction it leads to
                 t_load = max(self.load[target], JUNCTION_WEIGHT * self.junction_load[net.segments[target].to_node])
                 if t_load > worst:
                     worst, worst_id = t_load, target
+                if t_load > floor:
+                    weighted_excess += share * (t_load - floor)
             self.dload[sid], self._worst[sid] = worst, worst_id
             self.dload2[sid] = max(
                 (
@@ -165,11 +170,9 @@ class NetworkCoordinator:
                 self.throttle[sid] = 1.0
                 self._throttled.discard(sid)
                 continue
-            # Backpressure: meter only when this release would push traffic onto a link
-            # that is clearly worse off than the one it leaves (shifting the bottleneck).
-            # When everything is uniformly busy, metering would just waste green.
-            excess = worst - max(cfg.rho_gate, self.load[sid])
-            g = 1.0 - excess / (cfg.rho_block - cfg.rho_gate) if excess > 0.0 else 1.0
+            # Backpressure: meter in proportion to the turn share heading into jammed downstream links,
+            # so one congested side-turn never hard-freezes an entire boulevard whose main exit is clear.
+            g = 1.0 - weighted_excess / (cfg.rho_block - cfg.rho_gate) if weighted_excess > 0.0 else 1.0
             g = max(0.0, min(1.0, g))
             # Buses share the single lane with the cars and cannot pass them, so metering cars
             # would hold up a bus queued behind them: leave an approach alone while one is close.
@@ -316,9 +319,18 @@ class IntersectionController:
         elif self.phase == "ALLRED":
             if self.elapsed >= self.cfg.all_red:
                 self._start_green(now)
-        elif self.elapsed >= self.planned:  # a green only ever ends when its (possibly extended) time is up
-            if not (self.coord.adaptive and self.cfg.hold_horizon > 0.0 and self._hold_for_bus(now)):
-                self.phase, self.elapsed = "YELLOW", 0.0
+        elif self.phase == "GREEN":
+            # Emergency ambulance green-wave preemption (only active when an ambulance approaches this junction)
+            em = self.coord.emergency_approaches
+            if em:
+                if any(a in em for a in self.current):
+                    self.planned = min(self.cfg.max_green + 12.0, max(self.planned, self.elapsed + 1.5))
+                elif self.elapsed >= self.cfg.min_green and any(a in em for a in self.approaches):
+                    self.phase, self.elapsed = "YELLOW", 0.0
+                    return
+            if self.elapsed >= self.planned:  # a green only ever ends when its (possibly extended) time is up
+                if not (self.coord.adaptive and self.cfg.hold_horizon > 0.0 and self._hold_for_bus(now)):
+                    self.phase, self.elapsed = "YELLOW", 0.0
 
     def _start_green(self, now: float) -> None:
         self.idx = (self.idx + 1) % len(self.groups)
@@ -384,8 +396,8 @@ class IntersectionController:
         limit = cfg.hold_horizon * coord.trust(self.node, "BUS_HOLD")
         chosen: tuple[float, BusTelemetry, int, float] | None = None
         for tel, approach, dist in coord.loops.approaching(self.current, cfg.hold_window):
-            if dist <= 0.5:
-                continue  # already at or past the line
+            if dist <= 0.5 or getattr(tel, "at_stop", False):
+                continue  # already past the line, or currently boarding passengers at a CTP bus stop
             need = dist / max(tel.speed, cfg.hold_min_speed) + cfg.hold_margin
             if need > limit or coord.downstream_openness(approach) < cfg.hold_min_openness:
                 continue

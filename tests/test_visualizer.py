@@ -169,7 +169,9 @@ def test_the_dashboard_draws_at_the_extremes_with_rush_hour_on(screen, percent):
     ui = UiState(rows=snapshot_buses(sim))
     city.draw(screen, sim, ui)
     hud.draw(screen, sim, ui)
-    assert (percent == 0) == (not ui.rows)
+    # Traffic load scales cars only; the 51-line CTP bus schedule stays active even at 0% car load.
+    assert bool(ui.rows)
+    assert (percent == 0) == (sim.model.n_cars == 0)
 
 
 def test_every_line_in_the_city_has_its_own_colour(iasi_net):

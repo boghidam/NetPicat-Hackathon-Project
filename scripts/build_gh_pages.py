@@ -26,7 +26,7 @@ def main() -> None:
     out_data = DOCS / "data"
     out_slots = out_data / "slots"
     out_slots.mkdir(parents=True, exist_ok=True)
-    for rel in ("iasi_core.json", "iasi_routes.json"):
+    for rel in ("iasi_core.json", "iasi_routes.json", "iasi_buildings.json", "iasi_realism.json"):
         shutil.copy2(DATA / rel, out_data / rel)
     default_slot = DATA / "slots" / "default.json"
     if default_slot.exists():

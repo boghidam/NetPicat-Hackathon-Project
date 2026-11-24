@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 
 import networkx as nx
 
+from .buildings import IASI_CENTER_LAT, IASI_CENTER_LON, Building
 from .config import Config
 
 M_PER_DEG_LAT = 110540.0
@@ -96,6 +97,62 @@ class Intersection:
     lon: float
     signalised: bool
     gate: bool
+    kind: str = "standard"  # "standard" | "roundabout" | "yield"
+
+
+@dataclass(frozen=True)
+class Roundabout:
+    node: int
+    name: str
+    x: float
+    y: float
+    radius_m: float
+    ring_lanes: int  # 1 or 2 concentric circulating lanes (HG 130/2023)
+    signalized: bool  # True for mega-roundabouts (Podu Roș, Podu de Piatră); False for pure yield-to-left
+    arm_angles: dict[int, float] = field(default_factory=dict)  # seg_id -> perimeter angle (radians)
+
+
+@dataclass(frozen=True)
+class BusStop:
+    id: int
+    seg_id: int
+    pos_m: float
+    x: float
+    y: float
+    name: str
+    has_bay: bool
+    demand: float = 1.0
+
+
+@dataclass(frozen=True)
+class Crosswalk:
+    id: int
+    seg_id: int
+    pos_m: float
+    x: float
+    y: float
+    hub: str
+    rate: float = 0.02
+
+
+@dataclass(frozen=True)
+class RailCrossing:
+    name: str
+    seg_id: int
+    pos_m: float
+    x: float
+    y: float
+    period_s: float
+    closed_s: float
+    offset_s: float
+
+
+@dataclass(frozen=True)
+class Hospital:
+    name: str
+    node: int
+    x: float
+    y: float
 
 
 @dataclass(frozen=True)
@@ -113,6 +170,9 @@ class Segment:
     highway: str = ""
     name: str = ""
     tangents: tuple[tuple[float, float], ...] = ()  # unit direction of each polyline piece (for fast lookups)
+    lanes: int = 1  # mixed-traffic lanes in this direction (1, 2, or 3)
+    oneway: bool = False
+    grade_pct: float = 0.0  # uphill (+) / downhill (-) road grade in percent
 
     @property
     def arrives_from(self) -> str:
@@ -168,6 +228,358 @@ class RoadNetwork:
         self.route_by_ref: dict[str, RouteData] = {}
         self.route_index: dict[str, int] = {}
         self.set_routes(routes or [])
+
+        # Urban zoning & optional residential buildings (populated on real city maps such as Iași)
+        self.city_center_xy: tuple[float, float] = self.proj.to_xy(IASI_CENTER_LAT, IASI_CENTER_LON)
+        self.city_seg_ids: set[int] = {
+            s.id for s in self.segments if self.is_city_xy(*self.point_at(s.id, s.length * 0.5)[:2])
+        }
+        self.buildings: list[Building] = []
+        self.building_by_id: dict[int, Building] = {}
+        self.city_buildings: list[Building] = []
+        self.outer_buildings: list[Building] = []
+        self._node_dist_m: dict[int, dict[int, float]] = {}
+        self._city_dests_by_node: dict[int, list[Building]] = {}
+        self._outer_dests_by_node: dict[int, list[Building]] = {}
+        self.through_gate_pairs: list[tuple[int, int, list[int], float]] = []
+
+        # Realism structures (populated on real city maps via `apply_realism`)
+        self.roundabouts: list[Roundabout] = []
+        self.roundabout_by_node: dict[int, Roundabout] = {}
+        self.yield_nodes: set[int] = set()
+        self.yield_minor_approaches: dict[int, set[int]] = {}  # node -> side-street approaches that yield
+        self.bus_stops: list[BusStop] = []
+        self.stops_by_seg: dict[int, list[BusStop]] = {}
+        self.crosswalks: list[Crosswalk] = []
+        self.crosswalks_by_seg: dict[int, list[Crosswalk]] = {}
+        self.rail_crossings: list[RailCrossing] = []
+        self.rail_by_seg: dict[int, RailCrossing] = {}
+        self.hospitals: list[Hospital] = []
+
+    def apply_realism(self, data: dict) -> None:
+        """Apply multi-lane, roundabout, yield-junction, CTP bus-stop, hill-grade, and crosswalk metadata."""
+        from dataclasses import replace
+
+        edge_lanes = data.get("edge_lanes") or {}
+        edge_grades = data.get("edge_grades") or {}
+        rb_raw = data.get("roundabouts") or []
+        yield_set = {int(n) for n in (data.get("yield_nodes") or [])}
+        rb_by_node_raw = {int(r["node"]): r for r in rb_raw}
+
+        # Identify one-way vs two-way directed pairs
+        edge_pairs = {(s.from_node, s.to_node) for s in self.segments}
+        new_segs: list[Segment] = []
+        for seg in self.segments:
+            lanes = max(1, min(3, int(edge_lanes.get(str(seg.id), seg.lanes))))
+            oneway = (seg.to_node, seg.from_node) not in edge_pairs
+            grade = float(edge_grades.get(str(seg.id), 0.0))
+            stop_pos = seg.stop_pos
+            rb_info = rb_by_node_raw.get(seg.to_node)
+            if rb_info is not None:
+                rad = float(rb_info["radius_m"])
+                stop_pos = seg.length - min(rad + 4.5, 0.42 * seg.length)
+            new_segs.append(replace(seg, lanes=lanes, oneway=oneway, grade_pct=grade, stop_pos=stop_pos))
+        self.segments = new_segs
+
+        # Rebuild Intersection list with real roundabout / yield kinds & updated signalised flags
+        gate_set = set(self.gates)
+        new_nodes: list[Intersection] = []
+        for n in self.nodes:
+            if n.id in rb_by_node_raw:
+                sig = bool(rb_by_node_raw[n.id].get("signalized", False)) and n.id not in gate_set
+                new_nodes.append(replace(n, signalised=sig, kind="roundabout"))
+            elif n.id in yield_set and n.id not in gate_set:
+                new_nodes.append(replace(n, signalised=False, kind="yield"))
+            else:
+                new_nodes.append(n)
+        self.nodes = new_nodes
+        self.yield_nodes = {n.id for n in self.nodes if n.kind == "yield"}
+
+        # Rebuild signal phase groups & opposite partners for the updated signalised set
+        self._groups = {}
+        self.partner = {}
+        for node in self.nodes:
+            if node.signalised:
+                self._groups[node.id] = self._pair_approaches(node.id)
+
+        # Build Roundabout objects with exact right-hand arm perimeter angles (counterclockwise math angles)
+        self.roundabouts = []
+        self.roundabout_by_node = {}
+        for r in rb_raw:
+            nid = int(r["node"])
+            node = self.nodes[nid]
+            rad = float(r["radius_m"])
+            arm_angles: dict[int, float] = {}
+            for sid in self.in_segs[nid]:
+                seg = self.segments[sid]
+                p_rim = max(0.0, seg.length - min(rad + 3.0, seg.length * 0.42))
+                px, py, _, _ = self.position(sid, p_rim, lane=0.0)
+                arm_angles[sid] = math.atan2(py - node.y, px - node.x)
+            for sid in self.out_segs[nid]:
+                seg = self.segments[sid]
+                p_rim = min(seg.length, min(rad + 2.5, seg.length * 0.35))
+                px, py, _, _ = self.position(sid, p_rim, lane=0.0)
+                arm_angles[sid] = math.atan2(py - node.y, px - node.x)
+            rb = Roundabout(
+                node=nid,
+                name=str(r.get("name", f"Rond n{nid}")),
+                x=node.x,
+                y=node.y,
+                radius_m=rad,
+                ring_lanes=max(1, min(2, int(r.get("ring_lanes", 1)))),
+                signalized=bool(r.get("signalized", False)),
+                arm_angles=arm_angles,
+            )
+            self.roundabouts.append(rb)
+            self.roundabout_by_node[nid] = rb
+
+        # Identify minor yielding arm(s) at each unsignalized Cedează T-junction (the stem of the T yields!)
+        self.yield_minor_approaches = {}
+        for nid in self.yield_nodes:
+            groups = self._pair_approaches(nid)
+            # Paired opposite streets form the main priority road; any unpaired stem yields!
+            paired = {a for g in groups if len(g) >= 2 for a in g}
+            minor = set(self.in_segs[nid]) - paired
+            if not minor and len(self.in_segs[nid]) >= 2:
+                # Fallback: approach with lowest lane count / speed limit yields
+                worst = min(self.in_segs[nid], key=lambda s: (self.segments[s].lanes, self.segments[s].speed_limit))
+                minor = {worst}
+            self.yield_minor_approaches[nid] = minor
+
+        # Real CTP bus stops
+        self.bus_stops = []
+        self.stops_by_seg = {}
+        n_segs = len(self.segments)
+        for st in data.get("bus_stops") or []:
+            sid = int(st["seg_id"])
+            if 0 <= sid < n_segs:
+                seg = self.segments[sid]
+                pos_m = max(14.0, min(seg.stop_pos - 12.0, float(st["pos_m"])))
+                sx, sy, _, _ = self.position(sid, pos_m, lane=0.0)
+                bs = BusStop(
+                    id=int(st["id"]),
+                    seg_id=sid,
+                    pos_m=pos_m,
+                    x=sx,
+                    y=sy,
+                    name=str(st.get("name", f"Stație {sid}")),
+                    has_bay=bool(st.get("has_bay", False)),
+                    demand=float(st.get("demand", 1.0)),
+                )
+                self.bus_stops.append(bs)
+                self.stops_by_seg.setdefault(sid, []).append(bs)
+        for items in self.stops_by_seg.values():
+            items.sort(key=lambda s: s.pos_m)
+
+        # Pedestrian crosswalks
+        self.crosswalks = []
+        self.crosswalks_by_seg = {}
+        for cw in data.get("crosswalks") or []:
+            sid = int(cw["seg_id"])
+            if 0 <= sid < n_segs:
+                seg = self.segments[sid]
+                pos_m = max(12.0, min(seg.stop_pos - 4.0, float(cw["pos_m"])))
+                cx, cy, _, _ = self.point_at(sid, pos_m)
+                obj = Crosswalk(
+                    id=int(cw["id"]),
+                    seg_id=sid,
+                    pos_m=pos_m,
+                    x=cx,
+                    y=cy,
+                    hub=str(cw.get("hub", "")),
+                    rate=float(cw.get("rate", 0.02)),
+                )
+                self.crosswalks.append(obj)
+                self.crosswalks_by_seg.setdefault(sid, []).append(obj)
+
+        # CFR railway level crossings
+        self.rail_crossings = []
+        self.rail_by_seg = {}
+        for rc in data.get("rail_crossings") or []:
+            sid = int(rc["seg_id"])
+            if 0 <= sid < n_segs:
+                seg = self.segments[sid]
+                pos_m = max(20.0, min(seg.stop_pos - 15.0, float(rc["pos_m"])))
+                rx, ry, _, _ = self.point_at(sid, pos_m)
+                obj = RailCrossing(
+                    name=str(rc.get("name", "Pasaj CFR")),
+                    seg_id=sid,
+                    pos_m=pos_m,
+                    x=rx,
+                    y=ry,
+                    period_s=float(rc.get("period_s", 420.0)),
+                    closed_s=float(rc.get("closed_s", 38.0)),
+                    offset_s=float(rc.get("offset_s", 140.0)),
+                )
+                self.rail_crossings.append(obj)
+                self.rail_by_seg[sid] = obj
+
+        # Hospital dispatch hubs
+        self.hospitals = []
+        for h in data.get("hospitals") or []:
+            nid = int(h["node"])
+            if 0 <= nid < len(self.nodes):
+                nd = self.nodes[nid]
+                self.hospitals.append(Hospital(str(h.get("name", "Spital")), nid, nd.x, nd.y))
+
+    def is_city_xy(self, x: float, y: float) -> bool:
+        """True if local coordinate `(x, y)` lies inside the urban core radius."""
+        cx, cy = self.city_center_xy
+        return math.hypot(x - cx, y - cy) <= self.cfg.urban_radius_m
+
+    def is_city_segment(self, seg_id: int) -> bool:
+        """True if the midpoint of `seg_id` lies inside the urban core."""
+        return seg_id in self.city_seg_ids
+
+    def set_buildings(self, buildings: list[Building]) -> None:
+        """Attach residential buildings and precompute fast OD distance buckets + cross-city gate pairs."""
+        self.buildings = list(buildings)
+        self.building_by_id = {b.id: b for b in self.buildings}
+        self.city_buildings = [b for b in self.buildings if b.zone == "city"]
+        self.outer_buildings = [b for b in self.buildings if b.zone == "outer"]
+        if not self.buildings:
+            return
+
+        # Precompute node-to-node shortest road distances once (~0.04 s on Iași)
+        self._node_dist_m = dict(nx.all_pairs_dijkstra_path_length(self.nx, weight="length"))
+        # Build candidate destination buckets per origin node (with comfortable slack for time-vs-length paths)
+        c_min = max(0.0, self.cfg.city_trip_min_m - 600.0)
+        c_max = self.cfg.city_trip_max_m + 400.0
+        o_min = max(0.0, self.cfg.outer_trip_min_m - 800.0)
+        o_max = self.cfg.outer_trip_max_m + 600.0
+
+        self._city_dests_by_node = {}
+        self._outer_dests_by_node = {}
+        for nid in range(len(self.nodes)):
+            dmap = self._node_dist_m.get(nid, {})
+            if not dmap:
+                continue
+            self._city_dests_by_node[nid] = [
+                b for b in self.city_buildings
+                if c_min <= dmap.get(self.segments[b.seg_id].from_node, -1.0) <= c_max
+            ]
+            self._outer_dests_by_node[nid] = [
+                b for b in self.city_buildings
+                if o_min <= dmap.get(self.segments[b.seg_id].from_node, -1.0) <= o_max
+            ]
+
+        # Precompute valid cross-city through-traffic gate pairs (enter one side, cross city, exit far side)
+        cx, cy = self.city_center_xy
+        gate_ang = {g: math.atan2(self.nodes[g].y - cy, self.nodes[g].x - cx) for g in self.gates}
+        min_rad = math.radians(self.cfg.through_min_angle_deg)
+        pairs: list[tuple[int, int, list[int], float]] = []
+        for g1 in self.gates:
+            for g2 in self.gates:
+                if g1 == g2:
+                    continue
+                if abs(wrap(gate_ang[g2] - gate_ang[g1])) < min_rad:
+                    continue
+                path = self.path_between(g1, g2)
+                if not path:
+                    continue
+                total_len = sum(self.segments[s].length for s in path)
+                if not (self.cfg.outer_trip_min_m <= total_len <= self.cfg.outer_trip_max_m):
+                    continue
+                city_len = sum(self.segments[s].length for s in path if s in self.city_seg_ids)
+                if total_len > 0 and city_len / total_len >= 0.25:
+                    pairs.append((g1, g2, path, total_len))
+        self.through_gate_pairs = pairs
+
+    def route_length_m(self, route: list[int], start_pos: float = 0.0, dest_pos: float | None = None) -> float:
+        """Exact driving distance in metres along `route` from `start_pos` on leg 0 to `dest_pos` (or end)."""
+        if not route:
+            return 0.0
+        if len(route) == 1:
+            end = self.segments[route[0]].length if dest_pos is None else dest_pos
+            return max(0.0, end - start_pos)
+        total = max(0.0, self.segments[route[0]].length - start_pos)
+        for sid in route[1:-1]:
+            total += self.segments[sid].length
+        total += self.segments[route[-1]].length if dest_pos is None else dest_pos
+        return total
+
+    def building_to_building_trip(
+        self,
+        origin: Building,
+        rng: random.Random,
+        min_m: float,
+        max_m: float,
+        dest_zone: str = "city",
+    ) -> tuple[list[int], Building, float] | None:
+        """Build a contiguous route from `origin` building to a random building strictly within `[min_m, max_m]`."""
+        orig_seg = self.segments[origin.seg_id]
+        bucket = (
+            self._city_dests_by_node.get(orig_seg.to_node, [])
+            if origin.zone == "city" and max_m <= self.cfg.city_trip_max_m + 1.0
+            else self._outer_dests_by_node.get(orig_seg.to_node, [])
+        )
+        if not bucket:
+            bucket = self.city_buildings if dest_zone == "city" else self.buildings
+        if not bucket:
+            return None
+        n_b = len(bucket)
+        for _ in range(28):
+            dest = bucket[rng.randrange(n_b)]
+            if dest.id == origin.id or dest.seg_id == origin.seg_id:
+                continue
+            dest_seg = self.segments[dest.seg_id]
+            if orig_seg.to_node == dest_seg.from_node:
+                mid: list[int] = []
+            else:
+                path = self.path_between(orig_seg.to_node, dest_seg.from_node)
+                if not path:
+                    continue
+                mid = path
+            if dest.seg_id in mid or origin.seg_id in mid:
+                continue
+            route = [origin.seg_id, *mid, dest.seg_id]
+            dist_m = self.route_length_m(route, start_pos=origin.pos_m, dest_pos=dest.pos_m)
+            if min_m <= dist_m <= max_m:
+                return route, dest, dist_m
+        return None
+
+    def gate_to_building_trip(
+        self,
+        gate: int,
+        rng: random.Random,
+        min_m: float,
+        max_m: float,
+    ) -> tuple[list[int], Building, float] | None:
+        """Build a contiguous route from perimeter `gate` to a city building strictly within `[min_m, max_m]`."""
+        bucket = self._outer_dests_by_node.get(gate) or self.city_buildings
+        if not bucket:
+            return None
+        n_b = len(bucket)
+        for _ in range(28):
+            dest = bucket[rng.randrange(n_b)]
+            dest_seg = self.segments[dest.seg_id]
+            if gate == dest_seg.from_node:
+                mid: list[int] = []
+            else:
+                path = self.path_between(gate, dest_seg.from_node)
+                if not path:
+                    continue
+                mid = path
+            if dest.seg_id in mid:
+                continue
+            route = [*mid, dest.seg_id]
+            dist_m = self.route_length_m(route, start_pos=0.0, dest_pos=dest.pos_m)
+            if min_m <= dist_m <= max_m:
+                return route, dest, dist_m
+        return None
+
+    def through_city_trip(self, rng: random.Random, gate: int | None = None) -> tuple[list[int], float] | None:
+        """Pick an outside -> far outside cross-city route (5-20 km, passing through the city)."""
+        if not self.through_gate_pairs:
+            return None
+        if gate is None:
+            _, _, path, dist_m = rng.choice(self.through_gate_pairs)
+            return list(path), dist_m
+        matching = [p for p in self.through_gate_pairs if p[0] == gate]
+        if not matching:
+            return None
+        _, _, path, dist_m = rng.choice(matching)
+        return list(path), dist_m
 
     def set_routes(self, routes: list[RouteData]) -> None:
         """Register public bus lines (cyclic, contiguous edge lists)."""
@@ -339,8 +751,20 @@ class RoadNetwork:
         tx, ty = seg.tangents[i]
         return x0 + (x1 - x0) * f, y0 + (y1 - y0) * f, tx, ty
 
-    def position(self, seg_id: int, pos: float) -> tuple[float, float, float, float]:
-        """Like `point_at`, shifted to the right-hand lane: (x, y, dx, dy)."""
+    def lane_lateral_offset(self, seg: Segment, lane: float = 0.0) -> float:
+        """Lateral offset (m to the right of centerline) for `lane` (0 = outer/curb, n-1 = inner/left)."""
+        n = seg.lanes
+        if n <= 1:
+            return self.cfg.lane_offset
+        w = self.cfg.lane_width
+        if seg.oneway:
+            return ((n - 1) * 0.5 - lane) * w
+        # Two-way multi-lane boulevard: inner lane (n-1) hugs the center median, outer lane (0) hugs the right curb
+        return 1.9 + (n - 1 - lane) * w
+
+    def position(self, seg_id: int, pos: float, lane: float = 0.0) -> tuple[float, float, float, float]:
+        """Like `point_at`, shifted to the right-hand lane `lane` (0 = curb, n-1 = inner): (x, y, dx, dy)."""
+        seg = self.segments[seg_id]
         x, y, dx, dy = self.point_at(seg_id, pos)
-        off = self.cfg.lane_offset
+        off = self.lane_lateral_offset(seg, lane)
         return x + dy * off, y - dx * off, dx, dy
