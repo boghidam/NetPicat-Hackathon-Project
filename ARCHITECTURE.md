@@ -1,293 +1,239 @@
-# Smart City Traffic Demo: Architecture
+# Noodle Traffic Control: System Architecture
 
-A visual demo of adaptive traffic-signal control on the **real road network of Iași, Romania**, from Breazu to Blocuri Ciurea and from CUG to Tătărași. Individual cars and buses drive on one-lane roads; the buses follow 18 real CTP Iași lines (the ten backbone lines 20, 23, 28, 30, 36, 41, 42, 43, 47 and 52 among them) and double as moving congestion sensors. Only the buses are observed, never the cars, so no light is ever cut short: once per red-green cycle each junction checks how far the buses heading for it got, and lengthens its green only if they covered very little distance. It also avoids releasing cars toward an overloaded junction. An AI module forecasts what each bus will meet on the next links of its route and feeds that forward so the junctions ahead adjust before the bus arrives.
+A microscopic urban traffic digital twin and real-time adaptive traffic-signal control platform built on the **real road network of Iași, Romania** (~18 × 15 km, from Breazu & Copou to Blocuri Ciurea, CUG, Păcurari, and Tătărași).
 
-**Target:** Python 3.14 (3.14.8), `pygame-ce`, `numpy`, `networkx`, `pytest`; `osmnx` and `shapely` only to rebuild the dataset (see `requirements.txt`).
+The system operates in two modes:
+- **`Aether (Simulation)`** — Full multi-lane, multi-class microscopic traffic simulation with **51 real CTP Iași + AMTPI bus lines** (160 scheduled buses), ~1,500 OD-routed vehicles across **1,183 apartment blocks and houses**, **16 real Iași car roundabouts**, **14 CTP *rond* transit turnaround loops**, **35 unsignalized *Cedează* yield junctions**, **115 signalized intersections**, **222 real CTP bus stops**, hills, crosswalks, rail crossings, weather, 24h rush waves, urban double-parking friction, and hospital ambulance green-wave preemption.
+- **`Terra (Real)`** — Live real-world transit feed streaming real-time CTP Iași bus GPS positions from the **Tranzy Open Data API** (`api.tranzy.ai`, Agency `#1`), snapped onto the Iași road graph by a vectorized `MapMatcher` to generate live AI green-hold advisories and optionally sync real deployed fleet counts back into `Aether`.
 
-**Status:** implemented. The earlier grid-based demo was refactored onto the real map (see `docs/REFACTORING_PLAN.md`); section 12 records what was measured. Run it with `python -m smartcity.main --incident-at 60`.
+Controllers observe **only bus telemetry** (plus their own signal state and emergency ambulance preemption requests), never private car positions. Green phases obey SUMO-style safety timings and are **never cut short**; the AI only holds or extends green when bus evidence justifies it, meters upstream inflows toward overloaded downstream junctions, learns per-junction trust online via counterfactual odometer grading, and persists learned policies + Ridge predictor weights in crash-safe versioned JSON save slots.
+
+**Runtime & Dependencies:** Python 3.12+ (target 3.14), `numpy`, `networkx`, `fastapi`, `uvicorn`, `requests`, `pygame-ce` (optional legacy desktop view), `pytest`; `osmnx` and `shapely` only to rebuild raw OSM geometry (`requirements.txt`). A standalone client-side JavaScript engine (`web/standalone_sim.js`) also runs zero-backend on GitHub Pages (`docs/`).
 
 ---
 
-## 1. Overview and data flow
-
-The world (cars, buses, and the signals' effect on them) is simulated microscopically. Controllers see **only** bus telemetry plus their own signal state, never the world's vehicle positions. The buses really are the sensors.
+## 1. End-to-End Architecture & Data Flow
 
 ```mermaid
 flowchart LR
-    OSM[(OpenStreetMap<br/>roads + CTP bus relations)] -->|scripts/fetch_iasi.py| DATA[data/*.json]
-    DATA --> NET[RoadNetwork<br/>graph, polylines, phases, routes]
-    NET --> W[TrafficModel<br/>cars + buses, stop lines, boxes]
-    W -->|bus state| BF[BusFleet<br/>mock CTP API]
-    BF -->|BusTelemetry| TB[TelemetryBus]
-    TB --> CE[CongestionEstimator<br/>EWMA per edge]
+    OSM[(OpenStreetMap<br/>roads + CTP relations)] -->|fetch_iasi.py<br/>expand_ctp_routes.py| CORE[data/iasi_core.json<br/>data/iasi_routes.json]
+    CORE -->|generate_iasi_buildings.py<br/>enrich_iasi_realism.py| META[data/iasi_buildings.json<br/>data/iasi_realism.json]
+    CORE & META --> NET[RoadNetwork<br/>multi-lane graph, roundabouts,<br/>rond loops, stops, buildings]
+
+    NET --> W[TrafficModel<br/>MOBIL multi-lane, roundabouts,<br/>yields, bus stops, OD cars]
+    W -->|bus state| BF[BusFleet<br/>51 lines, 160 buses, layovers]
+    TRANZY[(Tranzy Open Data API<br/>CTP Iași GPS)] -->|MapMatcher| TP[TranzyProvider<br/>Terra Real Mode]
+
+    BF & TP -->|BusTelemetry| TB[TelemetryBus]
+    TB --> CE[CongestionEstimator<br/>EWMA per edge, skips at_stop]
     TB --> DL[DetectionLoops<br/>50 / 150 / 300 m]
-    TB --> RP[RouteProgress<br/>distance per cycle]
-    TB --> PR[PostIntersectionPredictor<br/>follows the bus's route]
-    CE --> NC[NetworkCoordinator<br/>graph-aware scoring and throttling]
-    DL --> NC
-    RP --> NC
-    PR -->|Forecast| NC
-    NC --> IC[IntersectionControllers<br/>SUMO-style phases, green only extended]
-    IC -->|light per approach, car throttle| W
-    IC --> EL[EventLog]
-    NC --> EL
-    PR --> EL
-    EL --> VIZ[Visualizer / HUD<br/>read-only, pan and zoom]
-    W --> VIZ
-    IC --> VIZ
+    TB --> RP[RouteProgress<br/>unwrapped route odometer]
+    TB --> PR[PostIntersectionPredictor<br/>online Ridge 3-hop forecast]
+
+    CE & DL & RP & PR --> NC[NetworkCoordinator<br/>2-hop openness, throttle, budget]
+    SLOTS[(data/slots/*.json<br/>schema v2)] <--> JL[JunctionLearner<br/>counterfactual RL trust & bonuses]
+    JL <--> NC
+    NC --> IC[IntersectionControllers<br/>115 signals, SUMO timings,<br/>bus holds, ambulance preemption]
+    IC -->|signal states & throttle| W
+    IC & NC & PR --> EL[EventLog]
+
+    W & IC & EL & TP --> WEB[FastAPI + WebSocket<br/>smartcity/web.py @ 20 Hz]
+    WEB <--> UI[Web Canvas UI<br/>Desktop Drawer + Mobile Sheet]
+    W & IC & EL --> PYG[Pygame Visualizer<br/>legacy desktop CLI]
 ```
 
-One simulation tick (`dt = 0.1 s`):
+One `Aether` simulation tick (`dt = 0.1 s`):
+1. Each `IntersectionController` advances its phase timer (`GREEN → YELLOW → ALLRED`) and evaluates real-time **Bus Green Holds** and **Emergency Ambulance Preemption**.
+2. `TrafficModel` updates active incidents, urban friction, crosswalks, CFR rail barriers, resting terminus buses, recessed bus-bay departures, circular roundabout rings, Wave 2 residential OD spawning, periodic MOBIL lane changes (`~3.3 Hz`), and per-lane car-following / stop-line / yield / bus-stop physics.
+3. `BusFleet` publishes one `BusTelemetry` per driving bus (`10 Hz`, flagging `at_stop` during passenger boarding and forgetting buses during terminal layovers/breaks).
+4. `CongestionEstimator`, `DetectionLoops`, `RouteProgress`, and `PostIntersectionPredictor` consume the telemetry stream.
+5. Every `0.5 s` (`decision_period`), `NetworkCoordinator` refreshes 1-hop and 2-hop downstream loads and turn-share-weighted car throttles.
+6. `JunctionLearner` self-grades completed extensions after yellow and updates per-junction trust in RAM; `SlotRuntime` flushes atomically to disk on periodic checkpoints (`300 s`), slot switches, or clean shutdown (`atexit`).
 
-1. Each `IntersectionController` advances its phase timer.
-2. `TrafficModel` moves every vehicle along its edge polyline: car-following, stop lines, crossing junctions, spawning and removing cars at the gates.
-3. `BusFleet` publishes one `BusTelemetry` per bus.
-4. The estimator, detection loops and predictor consume the telemetry.
-5. Every 0.5 s the `NetworkCoordinator` refreshes loads and throttles. Controllers decide only once per cycle, at the moment a green starts.
-
-Everything except rendering is headless and testable with `pytest`.
-
----
-
-## 2. The Iași dataset (`scripts/fetch_iasi.py`)
-
-Run once; the output (`data/iasi_core.json`, `data/iasi_routes.json`, about 180 KB) is committed so the app starts offline and tests are deterministic. The raw downloads go to `data/raw/` (git-ignored).
-
-1. **Area.** A box (47.095-47.213 N, 27.465-27.640 E) covering the built-up city: Breazu in the north to Blocuri Ciurea in the south, CUG and Canta in the west and south-east, Tătărași and Podu Roș in the east. The simulated network is about 18 x 15 km.
-2. **Roads.** Two Overpass queries (cached in `data/raw/`): the primary, secondary and tertiary ways in the box **plus every way of the chosen CTP relations, whatever its class** (residential, service, ...), so that each bus corridor exists exactly as mapped; and the relations themselves (stops in order, member ways). OSMnx builds the directed graph from the first.
-3. **Bus lines.** Eighteen of the 21 CTP bus relations in OpenStreetMap: the **backbone** lines 20, 23, 28, 30, 36, 41, 42, 43, 47 and 52 first, then 19, 29, 44, 46, 50, 6B, 27 and 501. Line 18 is left out (a loop whose outbound and return stops snap onto the same nodes) and so are 30B and 43C, which follow exactly the same roads as 30 and 43 inside this network. For each line the route is built from *waypoints*: its stops snapped to the nearest graph node, or, when OSM lists too few stops (line 52 has none), points sampled along its member ways in order. Waypoints are joined by shortest-time paths in which the relation's own ways cost a twentieth as much, so the path sticks to the mapped line. The return direction comes from the opposite relation, or from a shortest path back when OSM has none (36, 52, 6B); immediate reversals that snapping can create are removed. The result is a cyclic, contiguous edge list per line.
-4. **Crop for 60 FPS.** Nodes outside the main strongly connected network (24 one-way stubs and islands) are dropped before routing. Afterwards keep the arterial roads (primary, secondary and tertiary, plus their links) and every edge a bus route needs, then the largest strongly connected component (1,191 edges).
-5. **Merge junction clusters.** `osmnx.consolidate_intersections` (25 m tolerance) merges dual carriageways and roundabout nodes into single junctions, which also removes every edge shorter than 30 m. Route edges are mapped through the merge.
-6. **Result:** 263 nodes, 667 directed edges (428 km), speed limits from `maxspeed` tags (50 km/h urban default; 20-70 km/h occur), edge polylines, street names, and 18 routes whose loops are 13-33 km long. Stretches between junctions on the outskirts can be several kilometres.
-
-Map data (c) OpenStreetMap contributors, ODbL.
+Everything except rendering is headless and covered by **195 automated `pytest` tests**.
 
 ---
 
-## 3. Module layout
+## 2. The Iași Dataset Pipeline
 
-Package `smartcity/`:
+All processed JSON datasets are committed in `data/` (and mirrored into `docs/data/` by `scripts/build_gh_pages.py`), so the app starts completely offline and tests are deterministic.
+
+| Script | Output | Summary |
+|---|---|---|
+| `scripts/fetch_iasi.py` | `data/iasi_core.json`, base `data/iasi_routes.json` | Downloads the Iași drive graph (`47.095–47.213° N`, `27.465–27.640° E`) and base OSM CTP bus relations via Overpass/OSMnx, crops to the strongly connected arterial + transit spine, consolidates junction clusters (`25 m` tolerance) → **263 nodes, 667 directed edges (428 km)** and 18 base OSM routes. |
+| `scripts/expand_ctp_routes.py` | `data/iasi_routes.json` | Preserves the 18 OSM routes (adding exact `turnaround_leg` indices for terminus layovers) and adds the remaining **33 urban & AMTPI metropolitan bus lines** routed along real Iași streets → **51 total active lines** (`29` urban + `22` metropolitan). |
+| `scripts/generate_iasi_buildings.py` | `data/iasi_buildings.json` | Uses `smartcity/buildings.py` to generate **1,183 non-overlapping, street-aligned apartment blocks and detached houses** zoned by real Iași neighborhoods (Alexandru/Dacia, Păcurari, Nicolina/CUG, Podu Roș, Tudor, Tătărași, Centru, Copou, Galata, Țicău, Moara de Vânt, Dancu, Valea Lupului, Lunca Cetățuii). |
+| `scripts/enrich_iasi_realism.py` | `data/iasi_realism.json` | Generates deterministic real-world metadata: per-edge mixed-traffic lane counts (`356` 1-lane, `226` 2-lane, `85` 3-lane), **16 car roundabouts**, **14 CTP *rond* turnaround loops**, **35 unsignalized *Cedează* yield junctions**, **21 curated junction names**, **222 deduplicated real CTP bus stops**, **34 zebra crosswalks**, **249 graded hill segments** across Iași's 7 hills, **2 CFR rail crossings**, and **4 major hospitals**. |
+| `scripts/build_gh_pages.py` | `docs/` | Bundles `web/` assets, `standalone_sim.js`, `demo_config.js`, and `data/` JSON files into a zero-backend static site for GitHub Pages. |
+
+Map data © OpenStreetMap contributors (ODbL).
+
+---
+
+## 3. Module Layout
+
+### Core Python Package (`smartcity/`)
 
 | Module | Responsibility |
 |---|---|
-| `config.py` | Frozen dataclass holding all tunables |
-| `network.py` | `RoadNetwork`: graph of `Intersection`s and polyline `Segment`s with speed limits and stop lines; phase grouping by heading; turn options; gate selection; `networkx` routing; lat/lon projection |
-| `data.py`, `synthetic.py` | Load the committed Iași data into plain `GraphData`/`RouteData`; a small synthetic grid with the same interface for tests |
-| `traffic_model.py` | `TrafficModel` and `Vehicle`: the microscopic world and its physical rules |
-| `mock_api.py` | `BusFleet` (places buses on their lines, emits telemetry), `TelemetryBus` (pub/sub), `BusTelemetry` |
-| `congestion.py` | `CongestionEstimator`: per-edge EWMA of bus speed ratio, load, confidence |
-| `detection.py` | `DetectionLoops`: virtual loops at 50/150/300 m before every stop line, built from bus telemetry; finds the buses heading for a junction |
-| `progress.py` | `RouteProgress`: how far each bus has travelled along its line (unwrapped odometer and a short history), from telemetry alone |
-| `predictor.py` | `PostIntersectionPredictor`: the feed-forward AI module, following each bus's route |
-| `controller.py` | `IntersectionController` (phase machine; the per-cycle bus check) and `NetworkCoordinator` (graph-aware loads and throttle, evidence from buses, budget) |
-| `events.py` | `EventLog` of forecasts, adjustments, throttles, incidents |
-| `simulation.py` | Headless fixed-step engine wiring everything together |
-| `visualizer.py`, `hud.py` | `Camera` (projection, pan, zoom), city renderer, dashboard |
-| `main.py` | Entry point, key and mouse handling, `--compare`, `--screenshot` |
+| `config.py` | Frozen `Config` dataclass holding all tunables plus `TRAFFIC_AMOUNT` and `IASI_LINE_BUSES` (realistic weekday-peak fleet counts across all 51 CTP lines). |
+| `network.py` | `RoadNetwork`, `Intersection`, `Segment`, `Roundabout`, `RondLoop`, `BusStop`, `Crosswalk`, `RailCrossing`, `Hospital`; `coincident_twin` dual-carriageway detection (`2.5 m`), heading-based signal phase pairing, multi-lane lateral offsets, `apply_realism()`, OD distance tables, and equirectangular `LocalProjection`. |
+| `buildings.py` | `Building` dataclass, deterministic neighborhood-aware building generator, JSON loader, and compact map tuple serializer. |
+| `data.py`, `synthetic.py` | Loads committed Iași datasets (`iasi_core`, `iasi_routes`, `iasi_realism`, `iasi_buildings`) via `build_city("iasi", cfg)`, or builds the deterministic synthetic `"grid"` city for isolated unit tests. |
+| `traffic_model.py` | Microscopic world (`TrafficModel`, `Vehicle`): multi-lane `lane_tracks`, MOBIL overtaking & turn-lane pre-selection, Romanian OUG 195 / HG 130/2023 circular roundabouts, *Cedează* yield junctions, unprotected left-turn yielding, 222 CTP bus stops + recessed bays (`bay_buses`), terminus layovers/breaks, heterogeneous vehicle classes, hill grades, crosswalks, CFR rail crossings, urban double-parking friction, weather physics, 60/20/20 residential OD spawning, and ambulance routing. |
+| `mock_api.py` | `BusFleet` (realistic 51-line 160-bus deployment with staggered headways and `IASI_LINE_BUSES`), `TelemetryBus` pub/sub, and `BusTelemetry` (`at_stop` aware). |
+| `congestion.py` | `CongestionEstimator`: per-edge EWMA of bus speed ratio with staleness decay toward neutral prior (`0.25`); ignores braking/accel zones and `at_stop` boarding samples. |
+| `detection.py` | `DetectionLoops`: route-aware virtual loops at `50 / 150 / 300 m` upstream of every stop line, walking upstream edges across junctions. |
+| `progress.py` | `RouteProgress`: unwrapped per-bus route odometer and sliding history for per-cycle progress checks and counterfactual RL grading. |
+| `predictor.py` | `PostIntersectionPredictor`: online Ridge regression (`numpy`, window 200, cold-start EWMA) issuing 3-hop route-following delay & ETA forecasts with serializable state. |
+| `controller.py` | `IntersectionController` (SUMO-style phase machine, Bus Green Hold, per-cycle extension, predictive extension, ambulance preemption) and `NetworkCoordinator` (2-hop downstream openness, turn-share-weighted backpressure throttle, rolling extension budget, neighbor damping). |
+| `learning.py` | `JunctionLearner`: online counterfactual credit assignment (`BUS_HOLD` & `LOCAL_EXTEND` trust updates, `decisive`/`wasted`/`missed` tallies), per-phase transit corridor bonuses across 82 bus-dominant Iași nodes, and multi-episode `train_policy`. |
+| `slots.py` | `SlotManager` & `SlotRuntime`: versioned schema-v2 crash-safe JSON persistence (`data/slots/*.json`), automatic v1→v2 migration, atomic `os.replace` writes, periodic checkpointing, and `atexit` flushing. |
+| `providers/` | `TelemetryProvider` ABC (`base.py`), `TranzyProvider` + vectorized `MapMatcher` (`tranzy.py`), `CTPPrivateProvider` stub (`ctp_private.py`), and masked local credential store (`credentials.py`). |
+| `events.py` | `EventLog` recording `BUS_HOLD`, `LOCAL_EXTEND`, `PREDICTIVE_EXTEND`, `THROTTLE`, `FORECAST`, `FORECAST_RESOLVED`, `INCIDENT`, and `INFO`. |
+| `simulation.py` | Headless fixed-step engine wiring all components, 24h day-cycle demand curve, weather/friction/ambulance/rush-hour/traffic controls, and KPI metrics. |
+| `web.py` | FastAPI + 20 Hz WebSocket server (`EngineState`, `create_app`), REST API for map/slots/mode/credentials/fleet-sync, smooth 2D empirical Fixed-Timer baseline curve + EMA for `Bus Delay Reduced`. |
+| `visualizer.py`, `hud.py` | Legacy Pygame desktop renderer (`Camera`, city layers, HUD panels). |
+| `main.py` | Unified CLI entry point (`--web`, `--compare`, `--train`, `--slot`, `--clean`, `--reset-slot`, `--list-slots`, `--traffic`, `--rush`, `--incident-at`, `--screenshot`). |
+
+### Web Frontend (`web/`, mirrored to `docs/`)
+
+| File | Responsibility |
+|---|---|
+| `web/index.html` | Single-page civic Green & White dashboard: top mode/slot/API bar, full-bleed canvas, bottom-left map toolbar & legend (`Bus`, `Layover`, `Signal Hold`, `Roundabout`, `Rond Loop`), desktop collapsible drawer / mobile 3-snap swipeable bottom sheet, KPI cards, scenario controls, and modals. |
+| `web/app.js` | HTML5 Canvas renderer (buildings, multi-lane roads with medians & dashed band dividers, 16 roundabouts with clipped corridor arcs, 14 `R` *rond* loops, 222 stops, 34 crosswalks, 2 rail barriers, curb signal lamps, pulsing rings, class-differentiated vehicles, weather overlay, hover/tap tooltips), WebSocket client with auto-fallback to standalone mode, and mobile touch/sheet physics. |
+| `web/standalone_sim.js` | Self-contained client-side JS simulation + browser `localStorage` slot manager + direct Tranzy REST client so GitHub Pages runs without Python. |
+| `web/styles.css` | Bottle Green / Pearl White / Emerald civic design system + responsive mobile media queries. |
+| `web/demo_config.js` | Optional static deployment config (`TRANZY_API_KEY`, `TRANZY_AGENCY_ID`, `API_BASE_URL`) for zero-setup GitHub Pages presentations. |
 
 ---
 
-## 4. Road network and signals
+## 4. Road Network, Dual Carriageways & Junction Types
 
-**Graph.** Every OSM edge is a one-lane directed `Segment` from one intersection centre to the next along its polyline (`length` from OSM, scaled geometry, `speed_limit`, street `name`, headings at both ends). Two-way streets are two segments; one-way streets are one. Vehicles keep to the right-hand lane (3 m off the centre line).
-
-**Stop line and junction box.** Vehicles stop at the *stop line*, 14 m before the centre of the junction they approach (or 40% of the edge, if shorter). The area between the stop lines is the box.
-
-**Signalised junctions.** Every node with at least three incoming roads (and not a gate) gets signals: 143 of 263 in the Iași graph, which is more than the real city has. Nodes with fewer approaches are plain bends or merges with no signal.
-
-**Phases from geometry.** Incoming approaches are grouped by heading: two approaches whose headings are within 40 degrees of opposite share a green (greedy best match), and an unpaired street has a phase of its own. A crossroads gets two phases, a T-junction two (the through road, then the stem), a five-way junction three. A left turn is any turn of more than 35 degrees to the left; turn shares prefer going straight (U-turns only at dead ends).
-
-**Safety timings (SUMO-style, in `config.py`).** A green never lasts less than `min_green` = **7 s** (no flickering) and is never ended early: it is the standard 20 s, possibly *extended* (below), and only then comes **yellow 3 s**; then an **all-red clearance of 2 s** before the conflicting phase starts. At most 45 s. Phase state is `GREEN → YELLOW → ALLRED → next phase`. Neighbouring junctions start desynchronised.
-
-**Gates.** Nodes within 700 m of the edge of the map with traffic both ways (15 on the Iași graph, at most 16, spread by farthest-point sampling) are gates; the small test grid keeps its own settings (150 m band, 10 gates): cars appear on their outgoing edges and leave when they reach their destination gate.
-
-**Routing.** Cars follow the fastest `networkx` path (Dijkstra on free-flow travel time, cached) from a random gate to another. Buses follow their line's cyclic edge list. Both are plain edge sequences: no random walks.
-
-**Projection.** `LocalProjection` maps latitude/longitude to metres east/north of the map centre (equirectangular); `Camera` maps those to screen pixels with pan and zoom (`Camera.latlon_to_screen`).
+- **Multi-Lane Mixed-Traffic Segments:** Each directed `Segment` carries `lanes` (`1`, `2`, or `3`), `oneway`, `grade_pct`, `speed_limit`, precomputed `tangents`, and `stop_pos`. `RoadNetwork._find_coincident_twins(tol_m=2.5)` checks polyline coincidence so physically separated OSM dual carriageways (`6–67 m` apart) render and operate as separate 1-way carriageways rather than double-offset overlapping streets.
+- **115 Signalized Intersections:** Non-gate nodes with `>= 3` incoming roads, excluding the 13 unsignalized roundabouts and 35 yield junctions. Opposite approaches (within `40°` of `180°`) share a green phase; unpaired arms get their own phase.
+- **SUMO-Style Safety Timings (`config.py`):** `min_green = 7.0 s`, `base_green = 20.0 s`, `max_green = 45.0 s`, `yellow = 3.0 s`, `all_red = 2.0 s`. Cycle order is strictly `GREEN → YELLOW → ALLRED → next phase`, staggered across neighbors at start.
+- **16 Real Iași Car Roundabouts (*Sensuri Giratorii*):**
+  - **3 signalized 2-lane mega-roundabouts:** `Rond Podu Roș`, `Rond Podu de Piatră`, `Rond Fundație (Piața Mihai Eminescu)`.
+  - **13 yield-to-left roundabouts:** `Rond Zimbru`, `Rond Pasaj Octav Băncilă / ANL Zimbru`, `Rond Păcurari`, `Rond Agronomie (Copou)`, `Rond Râpa Galbenă / Gării`, `Rond Bd. Socola (Granit)`, `Rond Ciric / Aeroport`, `3× Rond Centura Iași`, `Rond Aroneanu`, `Rond Horpaz / Valea Adâncă`, `Rond CUG / Kaufland – Expo`.
+- **14 CTP Iași *Rond* Transit Turnaround Loops (`RondLoop`):** Rendered distinctly from car roundabouts with `R` center markers and hover tooltips listing served CTP lines (`Rond Dacia`, `Rond Canta`, `Rond CUG / Tehnopolis`, `Rond Vechi CUG`, `Rond Piața Gării`, `Rond Târgu Cucu`, `Rond Tătărași Nord/Sud`, `Rond Baza 3`, `Rond Copou / Agronomie`, `Rond Triumf`, `Rond Tudor Vladimirescu`, `Rond Dancu`, `Rond Bucium`).
+- **35 Unsignalized *Cedează* Yield Junctions:** Minor 3-arm T-junctions and 2-in merges where the unpaired stem or lower-hierarchy street yields (`yield_tc = 3.4 s` with impatience decay) to the continuous main priority arterial.
+- **15 Perimeter Gates:** Nodes within `700 m` of the map boundary (`max_gates = 16`, farthest-point spread) serving as outer entry/exit portals for metropolitan and cross-city trips.
 
 ---
 
-## 5. Vehicle rules (`TrafficModel`)
+## 5. Microscopic Traffic Physics (`TrafficModel`)
 
-Identical in fixed and adaptive mode, in plain Python in the spirit of SUMO's safety rules:
+Identical in Fixed and Adaptive modes:
 
-- *Red:* a vehicle holds at the stop line; nothing enters the box while its light is red.
-- *Yellow:* a vehicle stops if it can still do so with maximum braking; only vehicles too fast to stop continue.
-- *Green:* a vehicle crosses only if there will be room on the start of its next edge when it reaches the junction centre (whoever is last on that edge will have moved on by then, unless it is standing in a queue or stalled), so nobody enters the box without room to leave it.
-- *Car-following:* a vehicle keeps a safe distance behind the one ahead along the polyline (`v <= sqrt(2 * a_comfort * room)`), with no overtaking, so vehicles never overlap and never jump across nodes.
-- *Speed:* each vehicle drives at its edge's speed limit (cars vary by up to 8%), accelerating at 1.8 m/s² and braking at up to 6 m/s².
-- *Both sides pass together:* nothing yields to oncoming traffic. The two opposite streets of a green phase (and a left turn across the oncoming one) go at the same time and simply cross inside the box; when two streams merge into the same edge, the later vehicle falls in behind the earlier one as it lands. This keeps a left-turner from holding up everyone behind it on a one-lane road.
-- *Throttle:* when the coordinator meters an approach, cars (not buses) are released no faster than `sat_flow * g`.
-- *Incident:* a stalled vehicle parks mid-edge for 150 s. On a one-lane road nobody can overtake, so the lane is blocked.
-
----
-
-## 6. Sensing: estimator and virtual detection loops
-
-**Estimator.** EWMA of the bus speed ratio (speed over the edge's limit) per edge from mid-edge samples only (30 m past the previous junction, 40 m before the stop line), because speed near a signal reflects the signal. Confidence decays with staleness (`exp(-age / 90 s)`) and load is blended toward a neutral prior (0.25), so an unvisited edge is *unknown*, not *clear*.
-
-**Detection loops.** Each approach has virtual windows 50, 150 and 300 m before its stop line. A bus counts toward a window when its *road distance* to that stop line is within it, and the windows reach back across junctions: the loops are indexed by walking upstream edges that can turn into the approach. From the buses inside, a window yields counts, speed ratios and a density estimate:
-
-- buses still moving contribute their slowdown (`1 - speed ratio`), weighted 0.5 / 0.3 / 0.2 from near to far;
-- a *standing* bus (under 30% of the limit) proves a queue at least as long as its distance, so it sets a floor on how full the approach edge is (a bus 80 m back on a 150 m edge means a half-full edge, not a jam; one standing on the previous street means the queue covers the whole edge);
-- a standing bus within 40 m of its own stop line is ignored (it is waiting for its signal or pulling away).
-
-The density feeds the load estimate that the throttle uses; the windows' other job is to say which buses are heading for a junction (`buses_near`). A bus on an earlier edge counts only if *its own route* continues onto the approach within the next three edges.
-
-**Route progress.** `RouteProgress` turns each telemetry record into a distance along the bus's line (position of its edge on the route plus the distance along the edge, unwrapped over laps) and keeps a one-second history. `travelled(bus, now, span)` answers how many metres the bus covered during the last `span` seconds (or `None` if it has not been watched that long).
+- **Multi-Lane Tracking & MOBIL Lane Changing:** Each segment maintains `lane_tracks[seg_id][0..lanes-1]` (sorted descending by `pos`, with `lanes[seg_id]` aliased to `lane_tracks[seg_id][0]` for backward compatibility). Every `0.30 s`, vehicles evaluate lane changes (`lane_change_cooldown = 3.5 s`, smooth visual transition `1.4 s`) for:
+  1. Emergency ambulance open-lane selection & adjacent cars pulling right.
+  2. Bus curb-lane (`Bandă 1`) positioning for upcoming CTP stops (while still bypassing lane-0 stalled blockers).
+  3. Mandatory curb-lane selection (`< 120 m`) for destination buildings and right turns / 1st roundabout exits; inner-lane selection for left turns / 3rd+ roundabout exits.
+  4. Discretionary MOBIL overtaking around slower vehicles, boarding buses, or single-lane incidents/double-parked vans.
+- **Romanian Roundabout Kinematics (OUG 195/2002 + HG 130/2023):**
+  - Vehicles enter the circular ring right at the outer asphalt rim (`stop_pos + 1.5 m`, with right-hand `arm_angles`), circulate counterclockwise at `roundabout_speed = 7.2 m/s` on exact lane centerlines (`rad + 0.2 m` 1-lane; `rad + 0.7 m` outer / `rad - 2.9 m` inner 2-lane), and exit smoothly at the outer rim — **0 vehicles ever cross the green center island**.
+  - Unsignalized roundabouts enforce yield-to-the-left gap acceptance (`Tc = 3.6 s` car, `4.8 s` bus/truck, `Tf = 2.2 s`, weather-scaled with gentle impatience decay). Signalized mega-roundabouts obey entry signals first, then physical ring clearance.
+  - Per-ring-lane rim slot guards (`_rb_slot_available`), per-ring-lane follow-up timestamps, exit-spillback checks, and a strict total-order angle tie-breaker make mutual zero-angle deadlocks mathematically impossible.
+  - Under **HG 130/2023**, vehicles in *Bandă 2* (inner ring) must yield to occupied *Bandă 1* before exiting; if *Bandă 1* stays full at their exit, they either exit legally into *Bandă 2* of a 2+ lane exit road or complete one extra circulating loop rather than blocking the ring.
+- **Unprotected Left-Turn Yielding & Cornering:** On Iași, left-turners yield to oncoming straight/right vehicles (`< 36 m`, `< 2.4 s` TTA, capped at `4.2 s` impatience so phases clear cleanly) and slow naturally around corners (`6.4 m/s` left/right, `4.5 m/s` U-turn).
+- **222 CTP Bus Stops & Recessed Bays:** Buses decelerate to stop at each scheduled stop along their segment (`7.0–14.5 s × hub_demand` passenger boarding dwell). Stops with recessed bays temporarily move the bus into `bay_buses` (`+2.3 m` curb offset) so *Bandă 1* traffic flows unobstructed; curb stops hold in *Bandă 1* while cars overtake on multi-lane boulevards.
+- **Terminus Layovers & Driver Breaks:** Instead of despawning at route termini, buses park for `5–15 min` (`LAYOVER`) and take a `15–30 min` `DRIVER_BREAK` every `3–5` terminal arrivals (`resting_buses`), forgotten by all congestion/prediction sensors while parked.
+- **60/20/20 Residential OD Engine:** On Iași (`1,500` initial vehicles at `100%` traffic), Wave 1 + Wave 2 maintain `60%` city-to-building (`1–8 km`), `20%` outer-to-building (`5–20 km`), and `20%` opposite-gate cross-city through-traffic (`5–20 km`, `>= 90°` gate separation, `>= 25%` city traversal). Building-destined cars despawn strictly upon reaching their destination driveway (`dest_pos`), and Wave 2 spawns new trips only from uncrowded residential streets (`density < 0.30`).
+- **Heterogeneous Classes & Everyday Iași Friction:** Cars (`4.5 m`), delivery vans (`5.8 m`), heavy trucks (`10.8 m`), CTP buses (`12.6 m` articulated / `11.0 m` standard / `8.4 m` minibus), and ambulances (`6.2 m`). Includes hill-grade acceleration penalties (`249` sloped segments, strongest on trucks/buses), `34` stochastic zebra crosswalk pulses, `2` periodic CFR rail barriers, optional curbside double-parking vans (`urban_friction_enabled`, multi-lane roads only), Weather multipliers (`rain`: `-15%` speed, `+25%` headway, `+18%` car demand; `snow`: `-30%` speed, `+55%` headway, `+5%` demand), and optional 24h day-cycle demand wave (`07:00–09:30` & `16:00–19:00` rush peaks, `03:00` night trough).
 
 ---
 
-## 7. Global optimisation across the graph
+## 6. Sensing, Adaptive Control, Prediction & Online Learning
 
-1. **Graph-aware downstream gating (throttle).** For each approach the coordinator looks at every edge it can release into *and at the junction at the end of that edge*: the worst of `load(edge)` and `0.85 * junction_load(next node)`, where a junction's load is the mean of its two most loaded approaches. It meters car releases only when that is clearly worse than the edge the cars are leaving (backpressure: do not shift the bottleneck):
-
-   ```
-   excess = downstream - max(rho_gate, load_up)
-   g      = 1 if excess <= 0 else clamp(1 - excess / (rho_block - rho_gate), 0, 1)     # rho_gate 0.65, rho_block 0.85
-   ```
-
-   So releasing onto a perfectly free edge is still throttled when the junction it leads to (say a rush-hour Podu Roș) is overloaded. Metering is waived while a bus is in the 150 m window of the approach, because buses cannot overtake the cars they would be held behind.
-
-2. **Physical spillback.** The world enforces that nobody enters a box without room to leave it, so a queue that reaches a junction blocks that approach on green too.
-
-3. **The per-cycle bus check (the only observed-evidence extension).** Each phase remembers when it last turned green. When it turns green again, that is one red-green cycle later, and the controller asks, for every bus within 300 m of one of the phase's stop lines whose route continues onto it: *how far did this bus get during the cycle?* The answer is compared with what the speed limit would have allowed:
-
-   ```
-   share = metres travelled during the cycle / (cycle length * speed limit)
-   if share < 0.30 for the worst-held bus:
-       extension = 12 s * (1 - share / 0.30) * downstream openness    # scaled down toward 0 as the streets ahead jam
-   ```
-
-   **Downstream openness looks two junctions down the graph.** More buses means more greens asking for extra time, and a chain of greens that each push traffic toward a jam is how a local jam turns into a network-wide gridlock. So `downstream_openness(approach)` is the worse of two checks on the `networkx` graph: (a) the edges the approach releases into, and the junction at the end of each (as for the throttle); and (b) one junction further, every edge reachable from there without turning straight back (`dload2`, weighted 0.95), again with the load of the junction it leads to. When either is over `rho_gate` the extension shrinks, and at `rho_block` it is zero: no green is lengthened to push more vehicles toward a street whose next junction is already full. The same openness scales the predictive extension.
-
-   Only a bus that was watched for the whole cycle is judged; a bus that arrived during the last red and then crossed is not "low". If every bus got through, nothing changes. The extension is added to that green only; the budget below and `max_green` (45 s) cap it. The log says exactly why, for example: *bus B21 L43 covered 113 m in the last 50 s cycle (14% of free flow)*.
-
-4. **Feed-forward from the AI forecasts.** A forecast that a bus due within 30 s will make low progress on an approach of the starting phase (predicted density at least 0.2, confidence at least 0.3) lengthens the green that is starting by 6 s, once per forecast. This is the same idea as the cycle check, applied before the bus has been seen to stall.
-
-5. **Extension budget.** Total extension seconds across the network per rolling minute are capped at 1.2 s per signalised junction (172 s for the 143 signals of the Iași graph; never below 30 s, so a small network still works; `budget_seconds` sets an explicit cap), and extensions are damped when a neighbouring junction just extended (`networkx` neighbours). The cap grows with the network, so a bigger map is not starved of extensions and a small one is not flooded.
-
-6. **No early endings.** Because only buses are observed, a green is never shortened and never cut off: phases keep their fixed order and the standard length, so no street can be starved.
-
-Removed after measurement or on principle: a "spillback guard" that skipped or cut short phases whose exits looked full (it cost buses a few points and did not reduce jams); score-sized greens, early switches and out-of-order jumps, which decided about the *cars* from estimates and shortened some greens to lengthen others. Their code and settings are gone.
+1. **Bus-Only Sensing (`CongestionEstimator`, `DetectionLoops`, `RouteProgress`):**
+   - `CongestionEstimator` tracks per-edge EWMA speed ratio from mid-edge samples (`30 m` past entry, `40 m` before stop line), decaying confidence (`tau = 90 s`) toward a `0.25` prior. Samples with `at_stop=True` are skipped completely.
+   - `DetectionLoops` maintains route-aware `50 / 150 / 300 m` upstream windows across junctions to estimate queue occupancy and list buses heading for each approach.
+   - `RouteProgress` tracks each bus's unwrapped route odometer over laps.
+2. **Signal Control Hierarchy (`IntersectionController` + `NetworkCoordinator`):**
+   - **Emergency Ambulance Preemption:** Approaches within `180 m` of an active ambulance receive immediate green hold or early phase advance (still honoring `min_green`, `yellow`, and `all_red`).
+   - **Bus Green Hold (`BUS_HOLD`):** When a green is near expiry and a moving bus (not `at_stop`) is within `hold_window = 135 m` with downstream openness `>= 0.55`, the phase holds up to `hold_horizon = 11.5 s` (scaled by learned junction trust) so the bus clears without waiting a full red cycle.
+   - **Per-Cycle Progress Check (`LOCAL_EXTEND`):** Once per cycle at green start, if any bus heading for the phase covered `< 30%` of free-flow distance during the prior cycle, green is extended up to `cycle_ext_max = 7.0 s` scaled by shortfall, 2-hop downstream openness, and junction trust.
+   - **Feed-Forward Predictive Extension (`PREDICTIVE_EXTEND`):** `PostIntersectionPredictor` (online Ridge regression over last 3 edges, window 200, switching from EWMA after 25 outcomes) forecasts 3 hops ahead along the bus's route; predicted high-density arrivals within `30 s` add up to `pred_ext = 2.0 s` when downstream is open.
+   - **Turn-Share-Weighted Backpressure Throttle (`THROTTLE`):** Meters private cars (never buses or ambulances) in proportion to the turn-share heading into congested downstream edges or junctions (`rho_gate = 0.65`, `rho_block = 0.85`), waived whenever a bus is within `150 m` of the stop line.
+   - **Extension Budget & Neighbor Damping:** Network extensions per rolling `60 s` window are capped at `budget_per_junction = 5.0 s` per signalized junction (floor `30 s`), damped by `0.5` when a neighboring junction extended within `20 s`.
+3. **Counterfactual Online Learning & Save Slots (`JunctionLearner` + `SlotManager`):**
+   - Every `BUS_HOLD` and `LOCAL_EXTEND` is graded after yellow using the bus's odometer (`decisive`, `wasted`, or `missed`). Decisive holds reward the avoided red wait minus cross-street cost (`learn_cost = 0.8`), nudging per-junction trust (`0.18–1.45`, `learn_rate = 0.08`).
+   - Learned transit-corridor `phase_bonus` values across 82 bus-dominant Iași junctions ship in `data/slots/default.json`.
+   - `SlotManager` stores versioned schema-v2 JSON slots (`metadata`, `policy`, `predictor`) under `data/slots/<name>.json` using atomic temp-file writes + `os.replace`, keeping zero disk I/O inside `sim.step()`.
 
 ---
 
-## 8. AI post-intersection prediction (feed-forward, along the route)
+## 7. Web Backend, Live Terra Mode & Zero-Backend GitHub Pages
 
-```mermaid
-sequenceDiagram
-    participant Bus
-    participant I as Junction I
-    participant P as Predictor
-    participant J as Junctions ahead on the route
-    Bus->>I: crosses onto the next edge of its line
-    I->>P: BusTelemetry (line, route position, speed history)
-    P->>P: features, predict speed on this edge
-    P->>J: Forecasts for the next 3 edges of the route (delay, ETA, confidence)
-    J->>J: when its green starts, lengthen it if this bus is due soon and forecast to crawl
-    Bus->>J: arrives (eta)
-    J->>P: observed speed, error recorded, model updated
-```
-
-**Trigger.** A bus's telemetry shows it has moved onto a new edge of its line.
-
-**Features** (over its last 3 edges): mean speed ratio, last ratio, delay rate (fraction of time lost), trend. **Model:** an EWMA baseline at cold start, then an **online ridge regression** (NumPy, window of 200 outcomes) after 25 outcomes, predicting the speed ratio on the edge just entered. Rolling MAE of speed and ETA is shown on the HUD.
-
-**Following the predefined route.** Telemetry carries the bus's line and position along it, and the predictor looks the line up in the public route table. It forecasts the edge the bus just entered and the next two edges **of that route** (wrapping around the loop), each with `predicted_density = 1 - ratio`, an ETA built from edge lengths and limits, a `predicted_delay` (extra seconds over free flow on that edge) and a confidence that falls with each hop. When the bus clears the next junction, the window moves one edge forward and fresh forecasts are issued ahead of it.
-
-**Consumption.** When a phase turns green, forecasts for its approaches whose bus is due within 30 s and is predicted to make low progress lengthen that green by 6 s (`PREDICTIVE_EXTEND`), once per forecast. Nothing in the forecast can shorten or end a green. The forecast also raises the `fc_load` of its edge, which feeds the junction loads used by the throttle. Because the regression shrinks toward the mean, predicted densities are modest, so the trigger threshold is low (0.2) and predictive extensions are rare.
+- **FastAPI + WebSocket Server (`smartcity/web.py`):**
+  - **REST endpoints:** `GET /api/health`, `GET /api/map` (cached static geometry, roads, 16 roundabouts, 14 *rond* loops, named junctions & yield bars, 222 stops, 34 crosswalks, 2 rail crossings, 1,183 buildings, 51 routes), `GET /api/slots`, `POST /api/slots/select`, `POST /api/slots/reset`, `POST /api/mode`, `GET/POST /api/credentials`, `POST /api/sync-fleet`.
+  - **WebSocket (`/ws`, 20 Hz):** Streams compact frame telemetry (`kpis`, `cars` with class ID, `buses` with `status`/`at_stop`/`length`, `signals`, `rings`, `heat`, `active_crosswalks`, `active_rails`, `friction`, `weather`, `day_time`, `terra_status`, `advisories`) and handles runtime commands (`set_mode`, `set_adaptive`, `set_paused`, `set_speed`, `set_traffic`, `set_rush`, `trigger_incident`, `set_weather`, `set_day_cycle`, `set_urban_friction`, `dispatch_ambulance`, `reset_sim`).
+  - **Smooth Executive KPIs:** `Bus Delay Reduced (%)` compares live adaptive bus delay against a smooth 2D empirical Fixed-Timer baseline grid (`_FIXED_BASELINE_GRID` interpolated across car traffic `%` and sim time, steady-state `27.11%`) with exponential smoothing (`tau = 35 s`) to avoid noisy cycle-to-cycle spikes.
+- **Terra (Real) Mode (`smartcity/providers/tranzy.py`):** Polls `api.tranzy.ai/v1/opendata` (`vehicles`, `routes`, `trips`), snaps live GPS coordinates onto the Iași road network via vectorized NumPy `MapMatcher` (route-aware first within `180 m`, network-wide fallback `350 m`), feeds the same `CongestionEstimator` / `DetectionLoops` / `NetworkCoordinator` pipeline to surface real-time AI green-hold advisories, and allows one-click syncing of live observed route bus counts into `Aether`.
+- **Responsive Canvas UI & Standalone Browser Mode (`web/app.js`, `web/standalone_sim.js`):**
+  - Auto-detects local FastAPI via `/api/health`; if unreachable (e.g., GitHub Pages), seamlessly boots `NoodleStandaloneEngine` client-side with `localStorage` slots and optional `web/demo_config.js` Tranzy credentials.
+  - Clips transit corridors & heat layers at roundabout outer rims and renders counterclockwise arcs around each ring so landscaped roundabout islands and `R` *rond* loops remain crisp.
+  - Adapts automatically between a desktop collapsible floating right drawer and a mobile swipeable 3-snap bottom sheet (`peek` / `half` / `full`) with touch drag/velocity snapping, `Controls` & `Impact & Fleet` tabs, pinch-zoom, and viewport-clamped hover/tap tooltips.
 
 ---
 
-## 9. Mock API (the bus feed)
+## 8. Testing & Verification
 
-- In-process, 10 Hz of simulation time, no network. It stands in for a high-rate AVL feed.
-- 100 buses on 18 CTP lines at 100% traffic: **4 on every standard line** (19, 29, 44, 46, 50, 6B, 27, 501) and **6 to 8 on every backbone line** (20, 23, 28, 30, 36, 41, 42, 43, 47, 52; one bus per 3.3 km of loop, clamped to 6-8, so 20, 23, 28, 36, 41 and 47 get 6 and 30, 42, 43 and 52 get 8). They share the road with cars, queue at the same lights and obey the same junction rules.
-- **Staggered headways.** The buses of a line start evenly spaced around its loop (equal headways of loop length / buses, for example 4 km on line 30) with at most 40 m of jitter, on a free spot: if another line's bus is already there the new one is nudged along the loop. Buses added when the traffic amount goes up are put in the middle of the widest gap of their line, and thinning removes the bus whose neighbours are closest together, so the headways stay even at any traffic amount.
-- Each tick, one `BusTelemetry` per bus: ID, line number, position along the line, coordinates, distance to the next stop line, speed, the edge's speed limit, accumulated delay. Consumers `subscribe`; a ring buffer keeps recent records for the HUD.
-- Deterministic given a seed. Cars are *not* in the feed.
+Run the full headless test suite with `pytest` (**195 tests** across 19 modules):
 
----
-
-## 10. Visualizer and dashboard
-
-- **Projection and camera.** Latitude/longitude to metres to screen, with mouse-wheel zoom about the cursor, drag to pan, `F` to fit, `+`/`-` and arrow keys. The road layer is cached and only re-rendered when the view settles (while dragging, the old layer is shifted). Road width is exaggerated when zoomed out and true to scale when zoomed in.
-- **Look.** Dark theme with asphalt-grey road vectors sized by road class, sleek junction rings, neon stop-line bars for each approach (green `#39FF14`, yellow, red `#FF1744`), cars as small blue rectangles, buses as long rectangles coloured neon red-amber-lime by speed with their line number chip (one chip per 26 x 16 px cell, so a crowded centre stays readable), faint corridors in a distinct colour for each of the 18 CTP lines (`L`; the legend lists them all), landmark labels (Copou, Păcurari, Gara, Piața Unirii, Palas, Podu Roș, Tudor Vladimirescu), rings where an adjustment fires, cyan diamonds for AI forecasts, a red X on the stalled vehicle, a scale bar.
-- **HUD panels.** Live CTP telemetry table (bus ID, line, speed, distance to the line, delay, AI extra delay ahead); AI predictions (model, error, upcoming forecasts with predicted delay); the three loudest virtual detection loops; automated cycle adjustments (every override of the standard timer, with the reason: `EXTEND`, `PRED-EXT`, `THROTTLE`); metrics.
-- **Keeping 60 FPS with 100+ buses.** Drawing: each vehicle is projected once per frame (polyline pieces carry precomputed unit tangents, so a position lookup is a bisect and a multiply) and skipped when off screen; stop-line geometry is computed once; text is measured and rendered once per distinct string (`CachedFont`, bounded) instead of every frame; the dashboard's KPIs are computed once per tick, not once per frame. Simulation: the coordinator asks the predictor about every edge on every refresh, so forecasts are indexed by target edge instead of scanned per edge; gate-to-gate routes are cached `networkx` paths; vehicles are kept per lane so car-following looks only at the vehicle ahead. Measured: see section 12.
-- **Keys.** `B` adaptive/fixed, `I` incident, `Space` pause, `1`/`2`/`4`/`8` speed, `H` heat layer (off / true occupancy / estimated load), `L` bus lines, `[` `]` traffic amount, `\` normal traffic, `K` / `Shift+K` or a click on a key point for rush hour, `R` reset, `Q` quit.
-- **Traffic amount and rush hour (runtime controls).** `Simulation.set_traffic_percent` takes 0 to 1000 (100 is normal) and `step_traffic` walks the ladder 0, 10, ... 100, 150, 200, 300 ... 1000. It scales the car spawn rate at every gate and the bus fleet (the normal 100 buses split over the 18 lines; 1000% is 1000; 0% is none) and changes the vehicles already on the map at once: lowering removes a random share of the cars and the most recently added buses, raising scatters extra cars and puts extra buses into the widest gaps of their lines, 0% empties the map and 100% after 0% brings back a normal start. Buses taken off the map are forgotten by the detection loops, the odometer and the predictor, so no ghost telemetry remains. `set_rush_point` puts one of the 8 key points under pressure: the nearest signalised junction becomes a rush node, `rush_seed` commuter cars are placed on gate-to-gate routes through it straight away, and an extra stream of `rush_extra` times the normal gate demand (also scaled by the traffic amount) is routed through it from every gate, with no U-turn there. Pressure is thus extra *demand through the junction*: no signal or algorithm is changed. Reset keeps both settings. The starting amount is the global `TRAFFIC_AMOUNT` in `config.py` (1.0 is 100%; `Config(traffic_amount=...)` per run), applied when a simulation is built; the keys and `--traffic` move it afterwards. Rush hour places its seeded commuters within `rush_reach` (2 km) of the key point along their trips, because trips across the whole city are 15 km long and cars spread over them would hardly load one junction. Command line: `--traffic PERCENT`, `--rush KEY_POINT`.
+- **Network & Iași Data (`test_network.py`, `test_iasi_data.py`):** Projection round-trip, coincident dual-carriageway detection, multi-lane offsets, phase grouping, turn options, 51 routes, 16 roundabouts, 14 *rond* loops, 35 yield junctions, 222 stops, connectivity.
+- **Traffic Physics & Realism (`test_traffic_model.py`, `test_realism_and_roundabouts.py`, `test_residential_traffic.py`):** Red/yellow/green stop-line safety, car-following non-overlap, multi-lane MOBIL overtaking, OUG 195 yield-to-left gap acceptance, HG 130/2023 inner-to-outer exit yielding, zero roundabout deadlocks and zero center-island crossings, `at_stop` congestion isolation, 60/20/20 residential OD distribution & arrival-only despawning, weather, 24h day cycle, urban double-parking friction, and ambulance dispatch.
+- **Sensing, Control, Prediction & Learning (`test_congestion.py`, `test_detection.py`, `test_progress.py`, `test_controller.py`, `test_predictor.py`, `test_learning.py`, `test_slots.py`):** Virtual loop nesting, odometer tracking, SUMO timing guarantees (`>= 7 s` green, `3 s` yellow, `2 s` all-red), bus holds, 2-hop openness guards, backpressure throttle, 3-hop Ridge forecasts, counterfactual trust updates, atomic schema-v2 slot persistence & v1 migration.
+- **Providers, Web API & End-to-End (`test_mock_api.py`, `test_providers_and_fleet.py`, `test_traffic_controls.py`, `test_web.py`, `test_visualizer.py`, `test_end_to_end.py`):** Tranzy `MapMatcher` & fleet sizing, runtime car-only traffic scaling & rush-hour hotspots, FastAPI REST + WebSocket commands, legacy Pygame rendering (`SDL_VIDEODRIVER=dummy`), and city-wide 100%–300% traffic runs verifying zero red-light violations, zero overlaps, and smooth polyline motion.
 
 ---
 
-## 11. Testing strategy
+## 9. Measured Performance & Known Limits
 
-Everything except the window is headless. 165 tests:
+**Headless Paired Benchmark** (`python -m smartcity.main --compare --seconds 240 --seeds 2`, full Iași realism — 51 lines, 160 buses, 1,500 OD cars, multi-lane MOBIL, roundabouts, 222 bus stops, corridor incident at `t = 120 s`):
 
-- **Network and geometry:** projection round trip, compass names, polyline position and lane side on a bent road, stop-line set-back; phase grouping on crossroads, T, skewed, five-way and two-approach nodes; turn options without U-turns; gates; routing.
-- **Iași dataset:** the network is city-wide (at least 12 x 10 km, 100+ signals), 16 to 20 lines, every backbone line (20, 23, 28, 30, 36, 41, 42, 43, 47, 52) present, flagged and contiguous with no repeated colour or duplicate route, backbone routes run along the streets they serve, every gate reaches every other, every signalised junction has valid phases.
-- **World rules:** stop line on red, proceed on green, queue gaps, edge speed limits, wait when the exit is full, yellow, throttle spacing, buses not throttled, both sides of a green phase crossing in lockstep, a left-turner holding up neither the cars behind it nor the oncoming side, merging streams falling in behind one another, stalled vehicle, cars follow gate-to-gate routes.
-- **Signals:** opposite lights match at every junction at every tick (300 s of the real map); one phase non-red at a time; every street served; phase order green-yellow-all-red; **7 s minimum green, 3 s yellow and 2 s all-red measured**, including with adaptive extensions; **a green is never shorter than its standard time and its planned length only ever grows**.
-- **Sensing and controllers:** detection windows including across junctions, standing-bus rules, queue occupancy, route-aware `buses_near`; the route odometer (laps, history, unjudgeable buses); **the per-cycle check: a bus that barely moved gets the green extended, one that made good progress changes nothing, extensions scale with the shortfall, no judgement without a whole cycle of history or a previous green, far or off-route buses ignored, no extension into jammed streets *or when the junction two hops on is jammed* (also for predictive extensions), cap, budget and its growth with the number of signals, fixed timers unaffected**; the graph-aware throttle (an overloaded *downstream junction* throttles an upstream release onto a free edge) and its bus waiver; predictive extension.
-- **Prediction:** forecasts follow the route for three hops and wrap; the window moves ahead as the bus clears junctions; unknown lines get one hop; error recording, expiry, ridge learning.
-- **Fleet:** 4 buses on every standard line and 6 to 8 on every backbone line (100 in all); equal headways at the start, new buses go into the widest gap and thinning keeps the spacing even.
-- **Whole runs on the real map (both control modes):** no vehicle ever crosses a stop line on red, no two vehicles overlap, the box is clear when a new phase turns green, buses and cars never leave their routes, and adaptive control stays close to fixed timers while never cutting a green short. At 100% and 300% traffic (100 and 300 buses, up to 1,400 cars) the same checks run every tick, and the signal timings are measured again: no green under 7 s, every yellow exactly 3 s, every all-red exactly 2 s; the detection loops track every bus and their 50 / 150 / 300 m windows nest.
-- **Traffic amount and rush hour:** the ladder and its clamps; 100% changes nothing (identical run); 0% leaves no cars or buses and nothing spawns; the global `TRAFFIC_AMOUNT` sets the starting traffic; bus counts at 10/50/150/300/1000%; cars thinned or added at once; the spawn rate follows the percentage; removed buses are forgotten by every consumer; returning from 0% restores a normal fleet; lanes stay ordered at 1000%; the eight key points exist and each maps to a real signalised junction; case-insensitive choice and rejection of unknown names; cycling; commuters routed through the junction; rush hour raises the cars near Copou and Podu Roș at least twofold; lifting it; rush hour at 0% stays empty; keys, Shift+K, backslash, clicking a key point (and not dragging) and command-line validation.
-- **Rendering:** every line has its own colour and the legend lists all 18; one badge per crowded spot; the font cache returns shared surfaces and stays bounded; camera projection and zoom invariants, every heat and line mode on both maps, the interactive loop with keys and mouse, screenshots, all under `SDL_VIDEODRIVER=dummy`.
+| Mode | Bus Time Lost | Car Speed (% of limit) | Jam Edge-s (>50% dense) |
+|---|---|---|---|
+| Fixed Timers | `26.8%` | `60%` | `370` |
+| Adaptive AI (`default` slot) | **`22.9%`** (~14.5% delay cut) | **`61%`** | `382` |
 
----
+*(Steady-state Adaptive AI delay reduction across full Iași realism averages ~14% vs Fixed Timers without shortening any green phase or observing private cars.)*
 
-## 12. Results, risks and open items
-
-**Measured** (`python -m smartcity.main --compare --seeds 4`: a vehicle stalls on the busiest bus corridor from t=120 s to t=270 s, 600 s per run, normal traffic of 450 cars and 100 buses):
-
-| mode | bus time lost | car speed (share of limit) | edge-seconds half-occupied | cars exited | adjustments |
-|---|---|---|---|---|---|
-| fixed timers | 20.6% | 88% | 39 | 276 | 0 |
-| adaptive | 20.9% | 88% | 39 | 276 | 299 |
-
-Heavier and more concentrated traffic (bus time lost / car speed / half-occupied edge-seconds / cars exited, fixed then adaptive; 3 seeds):
-
-| scenario | fixed timers | adaptive |
-|---|---|---|
-| 100%, rush hour at Copou (600 s) | 21.5% / 79% / 307 / 280 | 21.8% / 79% / 227 / 280 |
-| 300% (480 s) | 25.3% / 81% / 747 / 622 | 25.5% / 80% / 922 / 621 |
-| 300%, rush hour at Podu Roș (480 s) | 30.4% / 64% / 4588 / 658 | 30.6% / 64% / 4655 / 665 |
-
-Ablation at 300% (5 seeds, 360 s, two seed sets; bus time lost / car speed / half-occupied edge-seconds / cars exited): seeds 1-5: fixed 25.2% / 81% / 597 / 481, everything on 25.3% / 81% / 788 / 480, throttle only 25.4% / 81% / 697 / 481, extensions only 24.8% / 82% / 672 / 480; seeds 6-10: fixed 25.2% / 82% / 615 / 464, everything on 25.1% / 81% / 670 / 463, throttle only 25.1% / 81% / 655 / 463. The second-hop check on its own changes nothing measurable (784 against 788 half-occupied edge-seconds with it switched off).
-
-Measured on an otherwise idle laptop with the window off screen (`SDL_VIDEODRIVER=dummy`, drawing a full frame and stepping the simulation):
-
-| traffic | vehicles | drawing | one tick | frame at 1x / 4x / 8x |
-|---|---|---|---|---|
-| 100% | 450 cars, 100 buses | 7.5 ms | 2.1 ms | 8 / 9 / 10 ms: 60 FPS |
-| 300% | 1,350 cars, 300 buses | 12.6 ms | 4.8 ms | 13 / 16 / 19 ms: 60 / 60 / 53 FPS |
-| 1000% | 4,500 cars, 1,000 buses | 30.8 ms | 15 ms | 33 / 41 / 51 ms: about 30 / 24 / 20 FPS |
-
-Before the work in section 10 the same frame at 100% cost about 11 ms on this map. A 15-minute run at 100% simulates in about 20 s headless.
-
-- **With only bus evidence and extend-only greens, adaptive control is close to a wash.** On the city-wide map the per-cycle check fires a few hundred times in ten minutes (299 adjustments at 100%) and each time cites a bus that really was held. Bus time lost and car speed end up within half a point of fixed timers at every traffic amount, and throughput within 2%. Half-occupied edge-seconds are noisy (a handful of edges out of 667 for a few minutes): lower with adaptive control at 100% with rush hour at Copou (227 against 307), higher at 300% (922 against 747; in a second seed set 670 against 615), and the same under rush hour at Podu Roș. The ablation says the throttle and the extensions each add a little to that count and neither buys back time for the buses. Neither mode gridlocks at 300%; the saturation that matters is at 1000% (below). An earlier version that also shortened some greens to lengthen others (score-sized splits and early switches, which decided about cars from estimates) measured better for buses on the small central map; removing those, as required because the cars are not observed, gives that up.
-- **Scale is where the safety rules earn their keep, not the gains.** Run every tick at 100% and at 300% (300 buses, up to 1,400 cars, 143 signals) the checks find no overlap, no vehicle crossing a stop line on red, no green under 7 s, every yellow exactly 3 s and every all-red exactly 2 s; vehicles advance at most one tick of the fastest speed limit per tick and only move on to an edge that starts where the last one ended. At 1000% (980 buses, 4,500 cars) the lanes stay ordered and no red is run either.
-- **The second-hop check is a guard, not a gain.** It refuses to lengthen a green when the junction two hops down is jammed. In these runs loads that high are rare (see the half-occupied counts above), so it rarely fires; the test suite exercises it with a forced jam.
-- **Free-flowing both sides help every mode.** Letting both sides of a phase pass together (no yielding, entry room judged for the moment of arrival) made the baseline itself much better than before. On the earlier central map (the numbers from before the city-wide rebuild): at the default demand fixed timers lost 36.2% of bus time (was 38.0%), cars averaged 64% of the limit (was 59%), and half-occupied edge-seconds fell from 328 to 179.
-- **Differences from the request.** CTP's lines as described in an earlier brief (28: Dacia - Podu Roș - Triumf; 41: Dacia - Podu Roș) do not match OpenStreetMap, where line 28 is Dacia - Copou and line 41 is Blocuri Ciurea - Piața Independenței; the dataset uses the OSM relations, since that is what can be queried. OSM has 21 CTP bus relations; 18 are simulated (the ten backbone lines and eight others). Line 18 and the variants 30B and 43C are left out (see section 2). Line 52 has no stops in OSM, so its path follows its mapped ways. OSM relations are volunteer-maintained and may differ from CTP's current timetable, and a line is simulated as a loop (out and back) at the speed limit with no stops or timetable (buses never dwell). With 4 buses on a standard line of about 30 km the headway is 7 to 8 km of loop, which is sparse by design.
-- **Simplifications.** One lane per direction whatever OSM `lanes` says; only primary/secondary/tertiary roads (plus every road the 18 lines use), so most residential streets are absent; every junction with three or more approaches is signalised, whereas only some are in reality; no pedestrians, lane changes or turn lanes; no collision physics inside the box (opposite streams and left turns pass through each other there); unsignalised bends and merges give way only by the room check. Speed limits come from `maxspeed` tags with a 50 km/h urban default.
-- **Nobody yields.** A model that made left-turners wait for gaps was dropped because on one lane the waiting vehicle blocked its whole approach while the oncoming side flowed. Over ten simulated minutes the number of vehicles standing at a green line six seconds or more into the green fell from 468 to 13 (the rest wait for a full road ahead).
-- **Predictive extensions are rare.** The model works but regresses to the mean, so few forecasts are dense enough to act on; the per-cycle check does most of the work. ETA error is large (roughly 15-25 s) because forecast arrivals ignore waiting at red.
-- **Bus-only sensing** means unvisited edges have no fresh data; confidence decays to a neutral prior, so the controllers see the *neighbourhood of the buses*, not the whole city.
-- **Rush hour** is extra demand routed through one chosen key point (see section 10), not a time-of-day profile; the key point is the nearest signalised junction to the label, which can be 100-200 m away. On the city-wide map the seeded commuters are placed within 2 km of the key point (`rush_reach`) so the pressure lands where it is meant to; over two simulated minutes the average number of cars within 400 m of Copou or Podu Roș rises at least twofold (a test).
-- **At 1000% the city is saturated on purpose.** Ten times the cars and ten times the buses (about 5,500 vehicles) are far beyond what a one-lane network can move, so queues spill back to the gates and `queued at gates` climbs. A frame costs about 33 ms (roughly 30 FPS, and the simulation falls behind real time at 1x because the loop keeps the window responsive); 300% still holds 60 FPS at 1x and 4x. Weights and thresholds are hand-tuned on a few seeds, not optimised.
+**Current Simplifications & Known Limits:**
+- **OSM & Road Coverage:** The graph focuses on Iași's primary/secondary/tertiary arterials plus all streets used by the 51 CTP lines (`263` nodes, `667` segments); minor residential cul-de-sacs are omitted, and the 33 expanded CTP lines beyond the 18 base OSM relations are routed via verified Iași corridor waypoints.
+- **No Street-Car Sensing by Design:** Because controllers observe only bus telemetry, edges with no recent bus passages decay toward the neutral `0.25` prior.
+- **Tram Tracks & Dedicated Bus Lanes:** Iași has mixed-traffic bus corridors (no car-free bus lanes are simulated); tramway infrastructure is represented at shared *rond* turnaround loops (`tram_bus`) while simulated vehicles focus on CTP buses and road traffic.
+- **No Physical Box Collisions:** Inside signalized junction boxes, crossing streams are governed by signal phases, left-turn yielding, and exit-room checks rather than 2D rigid-body collision physics.
+- **Browser Standalone Mode:** `web/standalone_sim.js` runs a lighter client-side approximation of the Python engine so GitHub Pages stays smooth at 60 FPS on desktop and mobile devices without a server.
 
 ---
 
-## 13. Running it
+## 10. Running It
 
 ```bash
-python3.14 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
-python -m smartcity.main --incident-at 60      # interactive demo on Iași (press B to compare with fixed timers)
-python -m smartcity.main --map grid            # the small synthetic city
-python -m smartcity.main --compare             # headless fixed vs adaptive table
-python scripts/fetch_iasi.py --refresh         # rebuild the dataset from OpenStreetMap (needs network)
-pytest                                         # tests (headless)
+# 1. Interactive Web Dashboard (recommended)
+python -m smartcity.web
+python -m smartcity.main --web --port 8000 --slot default
+
+# 2. Build zero-backend GitHub Pages static bundle in docs/
+python scripts/build_gh_pages.py
+
+# 3. Headless benchmark, RL training & slot inspection
+python -m smartcity.main --compare --seconds 240 --seeds 3
+python -m smartcity.main --train 5 --slot my_experiment
+python -m smartcity.main --list-slots
+
+# 4. Legacy Pygame desktop visualizer
+python -m smartcity.main --incident-at 60
+python -m smartcity.main --map grid
+
+# 5. Rebuild datasets (optional; committed files already work offline)
+python scripts/fetch_iasi.py --refresh
+python scripts/expand_ctp_routes.py
+python scripts/generate_iasi_buildings.py
+python scripts/enrich_iasi_realism.py
+
+# 6. Full automated test suite (195 tests)
+pytest
 ```

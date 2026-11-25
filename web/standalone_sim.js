@@ -133,15 +133,23 @@
     }
 
     async init() {
-      const [core, routesDoc, buildingsDoc, realismDoc, defaultSlot] = await Promise.all([
+      const slotNames = ["default", "trained_100ep", "trained_25ep", "fresh_0ep"];
+      const [core, routesDoc, buildingsDoc, realismDoc, ...loadedSlots] = await Promise.all([
         fetchFirstJson(["./data/iasi_core.json", "../data/iasi_core.json", "/data/iasi_core.json"]),
         fetchFirstJson(["./data/iasi_routes.json", "../data/iasi_routes.json", "/data/iasi_routes.json"]),
         fetchFirstJson(["./data/iasi_buildings.json", "../data/iasi_buildings.json", "/data/iasi_buildings.json"]).catch(() => null),
         fetchFirstJson(["./data/iasi_realism.json", "../data/iasi_realism.json", "/data/iasi_realism.json"]).catch(() => null),
-        fetchFirstJson(["./data/slots/default.json", "../data/slots/default.json", "/data/slots/default.json"]).catch(() => null),
+        ...slotNames.map((n) =>
+          fetchFirstJson([`./data/slots/${n}.json`, `../data/slots/${n}.json`, `/data/slots/${n}.json`]).catch(() => null)
+        ),
       ]);
 
-      this._loadSlots(defaultSlot);
+      const bundledSlots = {};
+      slotNames.forEach((n, idx) => {
+        if (loadedSlots[idx]) bundledSlots[n] = loadedSlots[idx];
+      });
+
+      this._loadSlots(bundledSlots);
       this._loadCredentials();
       this._buildNetwork(core, routesDoc, buildingsDoc, realismDoc);
       this._spawnFleet();
@@ -149,13 +157,20 @@
       return this.mapPayload;
     }
 
-    _loadSlots(defaultSlot) {
+    _loadSlots(bundledSlots) {
       try {
         const saved = JSON.parse(localStorage.getItem(SLOTS_KEY) || "{}");
         if (saved && typeof saved === "object") this.slots = saved;
       } catch (_) {}
+      let changed = false;
+      for (const [name, data] of Object.entries(bundledSlots || {})) {
+        if (!this.slots[name]) {
+          this.slots[name] = data;
+          changed = true;
+        }
+      }
       if (!this.slots.default) {
-        this.slots.default = defaultSlot || {
+        this.slots.default = {
           schema_version: 2,
           metadata: { slot_name: "default", map: "iasi", episodes: 8, sim_seconds_trained: 27974.6 },
           policy: {
@@ -168,8 +183,9 @@
             outcomes: { BUS_HOLD: { decisive: 1256, wasted: 0, missed: 266 }, LOCAL_EXTEND: { decisive: 34, wasted: 206, missed: 213 } },
           },
         };
-        this._saveSlots();
+        changed = true;
       }
+      if (changed) this._saveSlots();
       this.activeSlot = "default";
       this._hydrateSlotPolicy();
     }

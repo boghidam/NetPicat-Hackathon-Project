@@ -1,5 +1,7 @@
 # Refactoring plan: from the synthetic grid to the real Iași network
 
+> **Historical Milestone Document (Completed):** This plan records the initial migration from the 4×4 synthetic grid onto the real OpenStreetMap network of Iași. The platform has since evolved significantly into **Noodle Traffic Control** (51 CTP bus lines, multi-lane mixed-traffic streets with MOBIL overtaking, 16 Romanian roundabouts, 14 CTP *rond* loops, 35 *Cedează* yield junctions, 1,183 residential OD buildings, online counterfactual RL with JSON save slots, `Terra (Real)` Tranzy API integration, and a responsive FastAPI + GitHub Pages web dashboard). See [../ARCHITECTURE.md](../ARCHITECTURE.md) and [../README.md](../README.md) for the current system specification.
+
 ## What stays (the core logic)
 
 `congestion.py` (EWMA link load), `predictor.py` (EWMA→ridge feed-forward model), `controller.py` (phase machine, local extension, throttle, score-sized greens, extension budget), `events.py`, `simulation.py` wiring, the HUD structure, and the rule that controllers see only bus telemetry.
@@ -27,9 +29,9 @@
 5. **Visualizer and HUD:** projection, camera, dashboard.
 6. **Tests, performance check (60 FPS target), docs.**
 
-## Known limits to carry into the docs
+## Known limits (historical — at completion of this milestone)
 
-- One lane per direction regardless of OSM `lanes`.
+- ~~One lane per direction regardless of OSM `lanes`.~~ *(Resolved: Iași now models 1-, 2-, and 3-lane mixed-traffic carriageways with `coincident_twin` dual-carriageway detection and MOBIL lane changing.)*
 - Only primary/secondary/tertiary roads (plus whatever the bus routes need) are simulated.
-- Every junction with three or more approaches gets a signal, which is more than Iași really has.
-- OSM bus relations are volunteer-maintained and may differ from CTP's current timetable.
+- ~~Every junction with three or more approaches gets a signal, which is more than Iași really has.~~ *(Resolved: 13 unsignalized roundabouts and 35 unsignalized `Cedează` yield junctions are now carved out, leaving 115 signalized intersections.)*
+- OSM bus relations are volunteer-maintained and may differ from CTP's current timetable *(partially addressed via `expand_ctp_routes.py` for all 51 lines and live `Terra (Real)` Tranzy API sync).*

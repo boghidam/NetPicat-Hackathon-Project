@@ -5,10 +5,12 @@
 (function () {
   const CFG = window.NOODLE_CONFIG || {};
   const API_BASE = (CFG.API_BASE_URL || "").replace(/\/$/, "");
+  const THEME_KEY = "noodle_theme_v1";
 
   const isMobile = () => window.innerWidth <= 768;
 
   const state = {
+    theme: "light",
     backendOnline: false,
     standalone: null,
     ws: null,
@@ -39,6 +41,19 @@
   const workspaceEl = document.querySelector(".workspace");
   const mapControlsEl = document.querySelector(".map-controls");
   const drawerInnerEl = $("drawer") ? $("drawer").querySelector(".drawer-inner") : null;
+
+  function applyTheme(theme) {
+    const t = theme === "dark" ? "dark" : "light";
+    state.theme = t;
+    document.documentElement.dataset.theme = t;
+    const moon = $("themeIconMoon");
+    const sun = $("themeIconSun");
+    if (moon) moon.classList.toggle("hidden", t === "dark");
+    if (sun) sun.classList.toggle("hidden", t !== "dark");
+    const metaTheme = document.querySelector('meta[name="theme-color"]');
+    if (metaTheme) metaTheme.setAttribute("content", t === "dark" ? "#061913" : "#0f3d2e");
+    try { localStorage.setItem(THEME_KEY, t); } catch (_) {}
+  }
 
   function setMobileTab(tab) {
     state.mobileTab = tab === "impact" ? "impact" : "controls";
@@ -374,19 +389,22 @@
     }
   }
 
-  // ==================== LIGHT-MODE GREEN & WHITE MAP RENDERER ====================
+  // ==================== THEME-AWARE GREEN & WHITE / DARK MAP RENDERER ====================
   function drawMap() {
     const rect = canvas.parentElement.getBoundingClientRect();
     const W = rect.width, H = rect.height;
+    const isDark = state.theme === "dark";
     const weather = (state.frame && state.frame.weather) || "clear";
-    ctx.fillStyle = weather === "snow" ? "#eef4f7" : weather === "rain" ? "#e9f0ed" : "#f2f6f3"; // Pearl White canvas
+    ctx.fillStyle = isDark
+      ? (weather === "snow" ? "#111e24" : weather === "rain" ? "#0b1817" : "#0a1613")
+      : (weather === "snow" ? "#eef4f7" : weather === "rain" ? "#e9f0ed" : "#f2f6f3");
     ctx.fillRect(0, 0, W, H);
 
     if (!state.map) return;
     const sc = state.camera.scale;
 
     // Subtle urban grid backdrop texture
-    ctx.strokeStyle = "rgba(20, 83, 45, 0.035)";
+    ctx.strokeStyle = isDark ? "rgba(74, 222, 128, 0.045)" : "rgba(20, 83, 45, 0.035)";
     ctx.lineWidth = 1;
     const gridStep = 1000 * sc;
     if (gridStep > 24) {
@@ -420,20 +438,18 @@
         ctx.translate(sx, sy);
         ctx.rotate(-ang); // canvas Y points down, world Y points north
         if (isApt) {
-          // Apartment block: crisp Bone/Sage civic rectangle + subtle roof-deck inset
-          ctx.fillStyle = "#d5e4da";
-          ctx.strokeStyle = "rgba(20, 83, 45, 0.30)";
+          ctx.fillStyle = isDark ? "#132922" : "#d5e4da";
+          ctx.strokeStyle = isDark ? "rgba(74, 222, 128, 0.22)" : "rgba(20, 83, 45, 0.30)";
           ctx.lineWidth = sc >= 0.35 ? 1.15 : 0.75;
           ctx.fillRect(-sw / 2, -sd / 2, sw, sd);
           ctx.strokeRect(-sw / 2, -sd / 2, sw, sd);
           if (detailedApt && sw > 7 && sd > 4.5) {
-            ctx.fillStyle = "#eaf3ed";
+            ctx.fillStyle = isDark ? "#1a352c" : "#eaf3ed";
             ctx.fillRect(-sw * 0.34, -sd * 0.28, sw * 0.68, sd * 0.56);
           }
         } else {
-          // Detached house: warm Ivory footprint + pitched-roof ridge line on zoom
-          ctx.fillStyle = "#e8ece0";
-          ctx.strokeStyle = "rgba(22, 101, 52, 0.34)";
+          ctx.fillStyle = isDark ? "#162b24" : "#e8ece0";
+          ctx.strokeStyle = isDark ? "rgba(134, 239, 172, 0.24)" : "rgba(22, 101, 52, 0.34)";
           ctx.lineWidth = sc >= 0.35 ? 1.05 : 0.7;
           ctx.fillRect(-sw / 2, -sd / 2, sw, sd);
           ctx.strokeRect(-sw / 2, -sd / 2, sw, sd);
@@ -441,7 +457,7 @@
             ctx.beginPath();
             ctx.moveTo(-sw * 0.38, 0);
             ctx.lineTo(sw * 0.38, 0);
-            ctx.strokeStyle = "rgba(20, 83, 45, 0.32)";
+            ctx.strokeStyle = isDark ? "rgba(134, 239, 172, 0.22)" : "rgba(20, 83, 45, 0.32)";
             ctx.lineWidth = 0.9;
             ctx.stroke();
           }
@@ -450,9 +466,11 @@
       }
     }
 
-    // 1. Multi-Lane Road Casings (Bone/Sage outline), Snow White surfaces & Paved Junction Aprons
+    // 1. Multi-Lane Road Casings, Surfaces & Paved Junction Aprons
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
+    const roadCasing = isDark ? "#2d4b40" : "#bccdc2";
+    const roadSurface = isDark ? "#1a2f28" : "#ffffff";
     const exag = 1.0 + 1.05 * Math.max(0, Math.min(1, (0.55 - sc) / 0.45));
     for (const pass of [0, 1]) {
       for (const road of state.map.roads) {
@@ -471,12 +489,12 @@
           const [sx, sy] = toScreen(x, y);
           if (idx === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
         });
-        ctx.strokeStyle = pass === 0 ? "#bccdc2" : "#ffffff";
+        ctx.strokeStyle = pass === 0 ? roadCasing : roadSurface;
         ctx.lineWidth = pass === 0 ? w + 2.8 : w;
         ctx.stroke();
       }
       if (state.map.junctions && state.map.junctions.length) {
-        ctx.fillStyle = pass === 0 ? "#bccdc2" : "#ffffff";
+        ctx.fillStyle = pass === 0 ? roadCasing : roadSurface;
         for (const jn of state.map.junctions) {
           const [sx, sy] = toScreen(jn[2], jn[3]);
           if (sx < -45 || sx > W + 45 || sy < -45 || sy > H + 45) continue;
@@ -501,7 +519,9 @@
             if (idx === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
           });
           ctx.setLineDash(lanesDir >= 2 ? [] : [4, 5]);
-          ctx.strokeStyle = lanesDir >= 2 ? "rgba(20, 83, 45, 0.22)" : "rgba(20, 83, 45, 0.12)";
+          ctx.strokeStyle = isDark
+            ? (lanesDir >= 2 ? "rgba(134, 239, 172, 0.28)" : "rgba(134, 239, 172, 0.16)")
+            : (lanesDir >= 2 ? "rgba(20, 83, 45, 0.22)" : "rgba(20, 83, 45, 0.12)");
           ctx.lineWidth = lanesDir >= 2 ? Math.max(1.0, 1.3 * sc) : 0.85;
           ctx.stroke();
           ctx.setLineDash([]);
@@ -509,7 +529,7 @@
         // Subtle dashed band dividers inside 2-lane and 3-lane directions
         if (lanesDir >= 2 && sc >= 0.32 && road.pts.length >= 2) {
           ctx.setLineDash([5, 6]);
-          ctx.strokeStyle = "rgba(100, 125, 110, 0.28)";
+          ctx.strokeStyle = isDark ? "rgba(148, 196, 172, 0.26)" : "rgba(100, 125, 110, 0.28)";
           ctx.lineWidth = 0.85;
           const offsets = road.oneway
             ? (lanesDir === 2 ? [0] : [-1.55, 1.55])
@@ -554,16 +574,16 @@
         if (sc >= 0.18) {
           ctx.beginPath();
           ctx.arc(sx, sy, Math.max(2.2, apronR * 0.92), 0, Math.PI * 2);
-          ctx.fillStyle = "#ffffff";
+          ctx.fillStyle = roadSurface;
           ctx.fill();
         }
 
         if (jkind === "signalized" && sc >= 0.22) {
           ctx.beginPath();
           ctx.arc(sx, sy, Math.max(2.4, apronR * 0.80), 0, Math.PI * 2);
-          ctx.fillStyle = "#f7fbf8";
+          ctx.fillStyle = isDark ? "#1e372e" : "#f7fbf8";
           ctx.fill();
-          ctx.strokeStyle = "rgba(20, 83, 45, 0.16)";
+          ctx.strokeStyle = isDark ? "rgba(134, 239, 172, 0.24)" : "rgba(20, 83, 45, 0.16)";
           ctx.lineWidth = 0.9;
           ctx.stroke();
           if (sc >= 0.36 && apronR >= 4.5) {
@@ -571,7 +591,7 @@
             ctx.beginPath();
             ctx.moveTo(sx - ch, sy); ctx.lineTo(sx + ch, sy);
             ctx.moveTo(sx, sy - ch); ctx.lineTo(sx, sy + ch);
-            ctx.strokeStyle = "rgba(20, 83, 45, 0.18)";
+            ctx.strokeStyle = isDark ? "rgba(134, 239, 172, 0.25)" : "rgba(20, 83, 45, 0.18)";
             ctx.lineWidth = 0.9;
             ctx.stroke();
           }
@@ -632,9 +652,11 @@
         // Outer road casing & circular asphalt ring
         ctx.beginPath();
         ctx.arc(sx, sy, outerR, 0, Math.PI * 2);
-        ctx.fillStyle = "#ffffff";
+        ctx.fillStyle = roadSurface;
         ctx.fill();
-        ctx.strokeStyle = isSig ? "rgba(20, 83, 45, 0.42)" : "#b9cbc0";
+        ctx.strokeStyle = isDark
+          ? (isSig ? "rgba(74, 222, 128, 0.55)" : "#375a4e")
+          : (isSig ? "rgba(20, 83, 45, 0.42)" : "#b9cbc0");
         ctx.lineWidth = 1.6;
         ctx.stroke();
 
@@ -643,7 +665,7 @@
           ctx.beginPath();
           ctx.arc(sx, sy, islandR + ringW * 0.5, 0, Math.PI * 2);
           ctx.setLineDash([4, 4]);
-          ctx.strokeStyle = "rgba(100, 125, 110, 0.38)";
+          ctx.strokeStyle = isDark ? "rgba(148, 196, 172, 0.38)" : "rgba(100, 125, 110, 0.38)";
           ctx.lineWidth = 0.9;
           ctx.stroke();
           ctx.setLineDash([]);
@@ -674,10 +696,10 @@
           ctx.beginPath();
           ctx.moveTo(nsx, nsy);
           ctx.lineTo(sx, sy);
-          ctx.strokeStyle = "#9ecab1";
+          ctx.strokeStyle = isDark ? "#2f6b4f" : "#9ecab1";
           ctx.lineWidth = ringW + 2.4;
           ctx.stroke();
-          ctx.strokeStyle = "#ffffff";
+          ctx.strokeStyle = roadSurface;
           ctx.lineWidth = ringW;
           ctx.stroke();
         }
@@ -685,9 +707,11 @@
         // Paved turnaround ring
         ctx.beginPath();
         ctx.arc(sx, sy, outerR, 0, Math.PI * 2);
-        ctx.fillStyle = "#ffffff";
+        ctx.fillStyle = roadSurface;
         ctx.fill();
-        ctx.strokeStyle = lkind === "tram_bus" ? "rgba(21, 128, 61, 0.56)" : "rgba(14, 116, 144, 0.52)";
+        ctx.strokeStyle = lkind === "tram_bus"
+          ? (isDark ? "rgba(74, 222, 128, 0.65)" : "rgba(21, 128, 61, 0.56)")
+          : (isDark ? "rgba(56, 189, 248, 0.62)" : "rgba(14, 116, 144, 0.52)");
         ctx.lineWidth = 1.5;
         ctx.stroke();
 
@@ -895,9 +919,9 @@
         const islandR = Math.max(2.6, outerR - ringW);
         ctx.beginPath();
         ctx.arc(sx, sy, islandR, 0, Math.PI * 2);
-        ctx.fillStyle = "#c9e6d2";
+        ctx.fillStyle = isDark ? "#0e3325" : "#c9e6d2";
         ctx.fill();
-        ctx.strokeStyle = "rgba(20, 83, 45, 0.35)";
+        ctx.strokeStyle = isDark ? "rgba(74, 222, 128, 0.42)" : "rgba(20, 83, 45, 0.35)";
         ctx.lineWidth = 1.1;
         ctx.stroke();
       }
@@ -914,14 +938,20 @@
         const islandR = Math.max(2.1, outerR - ringW);
         ctx.beginPath();
         ctx.arc(sx, sy, islandR, 0, Math.PI * 2);
-        ctx.fillStyle = lkind === "tram_bus" ? "#dcf5e4" : "#e0f2fe";
+        ctx.fillStyle = isDark
+          ? (lkind === "tram_bus" ? "#113b29" : "#0e3142")
+          : (lkind === "tram_bus" ? "#dcf5e4" : "#e0f2fe");
         ctx.fill();
-        ctx.strokeStyle = lkind === "tram_bus" ? "rgba(21, 128, 61, 0.45)" : "rgba(14, 116, 144, 0.42)";
+        ctx.strokeStyle = isDark
+          ? (lkind === "tram_bus" ? "rgba(74, 222, 128, 0.55)" : "rgba(56, 189, 248, 0.55)")
+          : (lkind === "tram_bus" ? "rgba(21, 128, 61, 0.45)" : "rgba(14, 116, 144, 0.42)");
         ctx.lineWidth = 1.1;
         ctx.stroke();
         if (sc >= 0.28 && islandR >= 5.2) {
           ctx.font = `700 ${Math.min(10, Math.max(7, Math.round(islandR * 1.1)))}px Inter, sans-serif`;
-          ctx.fillStyle = lkind === "tram_bus" ? "#14532d" : "#0e7490";
+          ctx.fillStyle = isDark
+            ? (lkind === "tram_bus" ? "#86efac" : "#7dd3fc")
+            : (lkind === "tram_bus" ? "#14532d" : "#0e7490");
           ctx.textAlign = "center";
           ctx.textBaseline = "middle";
           ctx.fillText("R", sx, sy + 0.5);
@@ -944,7 +974,7 @@
           if (ax < -20 || ax > W + 20 || ay < -20 || ay > H + 20) continue;
           const [bx, by] = toScreen(sl[2], sl[3]);
           const col = sigColor[st] || "#16a34a";
-          ctx.strokeStyle = "rgba(255, 255, 255, 0.88)";
+          ctx.strokeStyle = isDark ? "rgba(10, 22, 19, 0.85)" : "rgba(255, 255, 255, 0.88)";
           ctx.lineWidth = barW + 2.0;
           ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
           ctx.strokeStyle = col;
@@ -1018,17 +1048,17 @@
           } else if (cls === 2) {
             // Heavy Truck / TIR
             const tl = Math.max(8.5, 10.6 * sc), tw = Math.max(3.2, 2.7 * sc);
-            ctx.fillStyle = "#627b6e";
+            ctx.fillStyle = isDark ? "#94b8a8" : "#627b6e";
             ctx.fillRect(-tl / 2, -tw / 2, tl, tw);
           } else if (cls === 1) {
             // Delivery Van / SUV
             const vl = Math.max(5.5, 5.8 * sc), vw = Math.max(2.8, 2.4 * sc);
-            ctx.fillStyle = "#7e998b";
+            ctx.fillStyle = isDark ? "#a9c8ba" : "#7e998b";
             ctx.fillRect(-vl / 2, -vw / 2, vl, vw);
           } else {
             // Passenger Car
             const cl = Math.max(4.4, 4.5 * sc), cw = Math.max(2.4, 2.2 * sc);
-            ctx.fillStyle = "#9ab0a4";
+            ctx.fillStyle = isDark ? "#b8d6c8" : "#9ab0a4";
             ctx.fillRect(-cl / 2, -cw / 2, cl, cw);
           }
           ctx.restore();
@@ -1218,14 +1248,14 @@
         if (overlaps) continue;
         placedLabels.push([bx0, by0, bx0 + boxW, by0 + boxH]);
       }
-      ctx.fillStyle = "rgba(255, 255, 255, 0.90)";
+      ctx.fillStyle = isDark ? "rgba(12, 28, 23, 0.90)" : "rgba(255, 255, 255, 0.90)";
       ctx.beginPath();
       ctx.roundRect(bx0, by0, boxW, boxH, 6);
       ctx.fill();
-      ctx.strokeStyle = "rgba(20, 83, 45, 0.16)";
+      ctx.strokeStyle = isDark ? "rgba(134, 239, 172, 0.25)" : "rgba(20, 83, 45, 0.16)";
       ctx.lineWidth = 1;
       ctx.stroke();
-      ctx.fillStyle = "#0f2a1f";
+      ctx.fillStyle = isDark ? "#e6f5ee" : "#0f2a1f";
       ctx.fillText(lm.name, sx - tw / 2, sy + 3.5);
     }
   }
@@ -1514,6 +1544,10 @@
     };
     $("btnDrawerTab").onclick = toggleDrawer;
     $("btnToggleDrawer").onclick = toggleDrawer;
+    const btnTheme = $("btnThemeToggle");
+    if (btnTheme) {
+      btnTheme.onclick = () => applyTheme(state.theme === "dark" ? "light" : "dark");
+    }
 
     // Mobile Bottom Sheet Buttons & Section Tabs
     $("btnPeekImpact").onclick = () => {
@@ -1850,6 +1884,12 @@
 
   // ==================== BOOTSTRAP (AUTO-DETECT FASTAPI vs GITHUB PAGES) ====================
   async function boot() {
+    const urlTheme = new URLSearchParams(location.search).get("theme");
+    let savedTheme = urlTheme === "dark" || urlTheme === "light" ? urlTheme : "light";
+    if (!urlTheme) {
+      try { savedTheme = localStorage.getItem(THEME_KEY) || "light"; } catch (_) {}
+    }
+    applyTheme(savedTheme);
     if (isMobile()) {
       setMobileTab("controls");
       setMobileSnap("peek", true);

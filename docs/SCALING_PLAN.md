@@ -1,5 +1,7 @@
 # Scaling plan: from 8 bus lines on a central spine to 18 lines across Iași
 
+> **Historical Milestone Document (Completed & Superseded):** This plan records the intermediate scaling pass from 8 to 18 CTP bus lines. The current **Noodle Traffic Control** release has scaled further to **all 51 CTP Iași + AMTPI bus lines (160 buses)**, 1,500 residential OD cars across 1,183 buildings, 1–3 mixed-traffic lanes per direction, 16 Romanian roundabouts, 14 CTP *rond* loops, 35 yield junctions, 222 CTP bus stops, and a responsive Web UI (`Aether (Simulation)` & `Terra (Real)`). See [../ARCHITECTURE.md](../ARCHITECTURE.md) and [../README.md](../README.md) for current details.
+
 ## What stays
 
 The `RoadNetwork` model and its OSMnx/lat-lon projection, the microscopic world and its rules (stop lines, car-following, no overlap), the SUMO-style phase timings (7 s minimum green, 3 s yellow, 2 s all-red), the virtual detection loops, the route odometer and the per-cycle bus check, the route-following predictor, the throttle, and every runtime control added so far (traffic amount, rush hour).
@@ -24,8 +26,8 @@ The `RoadNetwork` model and its OSMnx/lat-lon projection, the microscopic world 
 5. Profile and fix.
 6. Tests and docs.
 
-## Limits to carry into the docs
+## Limits (historical — at completion of this milestone)
 
-- OSM relations are volunteer-maintained; some lines are incomplete (52 has no stops) and may differ from CTP's current timetable.
+- OSM relations are volunteer-maintained; some lines are incomplete (52 has no stops) and may differ from CTP's current timetable *(since expanded to all 51 lines via `scripts/expand_ctp_routes.py` plus live `Terra (Real)` Tranzy GPS sync)*.
 - Only the arterial roads and the roads the chosen lines use are simulated.
-- One lane per direction; every junction with three or more approaches is signalised.
+- ~~One lane per direction; every junction with three or more approaches is signalised.~~ *(Resolved: Iași now models 1–3 mixed-traffic lanes/direction, 16 car roundabouts, 14 CTP `rond` loops, 35 unsignalized `Cedează` yield junctions, and 115 signalized intersections.)*

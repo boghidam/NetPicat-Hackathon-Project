@@ -1989,3 +1989,197 @@ button, select, input {
     pointer-events: none;
   }
 }
+
+
+/* ==================== DARK MODE THEME (Deep Emerald & Obsidian) ==================== */
+[data-theme="dark"] {
+  --bottle-green: #09241b;
+  --bottle-green-deep: #061913;
+  --forest-green: #4ade80;
+  --kelly-green: #22c55e;
+  --kelly-hover: #16a34a;
+  --lime-green: #a3e635;
+  --lime-soft: rgba(132, 204, 22, 0.16);
+  --mint-soft: rgba(34, 197, 94, 0.16);
+
+  --snow-white: #11221d;
+  --whisper-white: #0d1b17;
+  --pearl-white: #091411;
+  --ivory-white: #0e1e19;
+  --bone-white: #1c332b;
+
+  --ink: #e8f5ef;
+  --ink-muted: #9eb9ad;
+  --ink-dim: #749285;
+  --border: rgba(134, 239, 172, 0.14);
+  --shadow-lg: -8px 12px 34px rgba(0, 0, 0, 0.52);
+  --shadow-sm: 0 2px 12px rgba(0, 0, 0, 0.36);
+}
+
+[data-theme="dark"] .topbar {
+  background: linear-gradient(90deg, #05140f 0%, #09221a 55%, #0c2b21 100%);
+  border-bottom: 1px solid rgba(134, 239, 172, 0.12);
+  color: #f0faf5;
+}
+
+[data-theme="dark"] .brand-title,
+[data-theme="dark"] .brand-title strong,
+[data-theme="dark"] .mode-pill.active,
+[data-theme="dark"] .seg-btn.active,
+[data-theme="dark"] .mini-btn.primary,
+[data-theme="dark"] .btn-primary {
+  color: #ffffff;
+}
+
+[data-theme="dark"] .popover {
+  background: #10211c;
+  border-color: rgba(134, 239, 172, 0.18);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.58);
+}
+
+[data-theme="dark"] .popover-head,
+[data-theme="dark"] .popover-foot {
+  background: #0c1915;
+}
+
+[data-theme="dark"] .pop-action.danger-soft {
+  background: rgba(220, 38, 38, 0.16);
+  color: #fca5a5;
+}
+
+[data-theme="dark"] .pop-action.danger-soft:hover {
+  background: rgba(220, 38, 38, 0.28);
+}
+
+[data-theme="dark"] .map-status-chip,
+[data-theme="dark"] .zoom-stack,
+[data-theme="dark"] .map-pill-bar {
+  background: rgba(14, 30, 25, 0.92);
+  border-color: rgba(134, 239, 172, 0.16);
+}
+
+[data-theme="dark"] .map-status-chip {
+  color: #bbf7d0;
+}
+
+[data-theme="dark"] .map-tooltip {
+  background: #061812;
+  color: #ecfdf5;
+  border: 1px solid rgba(74, 222, 128, 0.28);
+}
+
+[data-theme="dark"] .drawer {
+  background: rgba(12, 26, 22, 0.96);
+  border-color: rgba(134, 239, 172, 0.15);
+}
+
+[data-theme="dark"] .drawer-tab {
+  background: #11221d;
+  color: #4ade80;
+  border-color: rgba(134, 239, 172, 0.18);
+}
+
+[data-theme="dark"] .card {
+  background: #132721;
+  border-color: rgba(134, 239, 172, 0.12);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.24);
+}
+
+[data-theme="dark"] .hero-card {
+  background: linear-gradient(135deg, #132d24 0%, #11221d 75%);
+  border-left: 4px solid #22c55e;
+}
+
+[data-theme="dark"] .hero-value {
+  color: #4ade80;
+}
+
+[data-theme="dark"] .bar-fill.fixed {
+  background: #2c463d;
+}
+
+[data-theme="dark"] .info-ic {
+  background: #0c1b16;
+  border-color: rgba(134, 239, 172, 0.25);
+  color: #9eb9ad;
+}
+
+[data-theme="dark"] .stat-tooltip {
+  background: #071913;
+  color: #ecfdf5;
+  border-color: rgba(163, 230, 53, 0.42);
+}
+
+[data-theme="dark"] .mini-btn.warn:hover {
+  background: rgba(220, 38, 38, 0.18);
+  color: #fca5a5;
+  border-color: rgba(248, 113, 113, 0.35);
+}
+
+[data-theme="dark"] .mini-btn.emg {
+  background: rgba(220, 38, 38, 0.14);
+  color: #fca5a5;
+  border-color: rgba(248, 113, 113, 0.32);
+}
+
+[data-theme="dark"] .mini-btn.emg:hover {
+  background: rgba(220, 38, 38, 0.26);
+  border-color: #f87171;
+}
+
+[data-theme="dark"] .w-btn.active {
+  background: #1b382f;
+  color: #4ade80;
+}
+
+[data-theme="dark"] .modal-backdrop {
+  background: rgba(2, 10, 7, 0.68);
+}
+
+[data-theme="dark"] .modal-card {
+  background: #11221d;
+  border-color: rgba(134, 239, 172, 0.2);
+}
+
+[data-theme="dark"] .modal-head h3 {
+  color: #ecfdf5;
+}
+
+[data-theme="dark"] .field-input,
+[data-theme="dark"] .select-wrap select {
+  background: #0b1814;
+  color: #e8f5ef;
+  border-color: rgba(134, 239, 172, 0.22);
+}
+
+[data-theme="dark"] .field-msg.error {
+  background: rgba(220, 38, 38, 0.16);
+  color: #fca5a5;
+}
+
+[data-theme="dark"] .sheet-header,
+[data-theme="dark"] .sheet-tabs {
+  background: rgba(12, 26, 22, 0.98);
+  border-color: rgba(134, 239, 172, 0.14);
+}
+
+[data-theme="dark"] .sheet-pill {
+  background: rgba(134, 239, 172, 0.28);
+}
+
+[data-theme="dark"] .peek-ctrl-btn,
+[data-theme="dark"] .peek-icon-btn {
+  background: #173028;
+  color: #e8f5ef;
+  border-color: rgba(134, 239, 172, 0.18);
+}
+
+[data-theme="dark"] .leg-rb {
+  border-color: #3d6255;
+  background: #133b2a;
+}
+
+[data-theme="dark"] .leg-rond {
+  border-color: #22c55e;
+  background: #123b29;
+}
