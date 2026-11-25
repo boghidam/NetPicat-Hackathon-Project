@@ -202,11 +202,10 @@ class CityView:
         surf, net, cam = self._layer, sim.net, self.camera
         surf.fill(BG)
 
-        twin = {(s.from_node, s.to_node): s.id for s in net.segments}
         drawn: list[tuple[list[tuple[float, float]], int, str]] = []
 
         for seg in net.segments:
-            back = twin.get((seg.to_node, seg.from_node))
+            back = net.coincident_twin.get(seg.id)
             if back is not None and back < seg.id:
                 continue
 

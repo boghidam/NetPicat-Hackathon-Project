@@ -1505,6 +1505,10 @@ button, select, input {
     pointer-events: none;
   }
 
+  .workspace.sheet-dragging .map-controls {
+    transition: none;
+  }
+
   .zoom-stack,
   .map-pill-bar {
     pointer-events: auto;
@@ -1597,13 +1601,17 @@ button, select, input {
     -webkit-user-select: none;
   }
 
+  .sheet-header button {
+    touch-action: none;
+  }
+
   .drawer[data-snap="peek"] .sheet-header {
     border-bottom-color: transparent;
   }
 
   .sheet-drag-zone {
     width: 100%;
-    padding: 8px 0 4px;
+    padding: 10px 0 6px;
     display: flex;
     justify-content: center;
     align-items: center;
@@ -1611,10 +1619,10 @@ button, select, input {
   }
 
   .sheet-pill {
-    width: 38px;
-    height: 4px;
+    width: 44px;
+    height: 5px;
     border-radius: 999px;
-    background: rgba(20, 83, 45, 0.22);
+    background: rgba(20, 83, 45, 0.30);
   }
 
   .sheet-peek-row {

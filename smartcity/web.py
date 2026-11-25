@@ -179,8 +179,9 @@ class EngineState:
 
     def _stop_line_pts(self, seg_id: int) -> list[float]:
         seg = self.net.segments[seg_id]
-        x, y, dx, dy = self.net.position(seg.id, seg.stop_pos)
-        half = 4.2
+        mid_lane = (seg.lanes - 1) * 0.5
+        x, y, dx, dy = self.net.position(seg.id, seg.stop_pos, lane=mid_lane)
+        half = max(2.2, seg.lanes * 1.55)
         return [round(x - dy * half, 1), round(y + dx * half, 1), round(x + dy * half, 1), round(y - dx * half, 1)]
 
     def map_payload(self) -> dict[str, Any]:
@@ -188,18 +189,18 @@ class EngineState:
         if self._map_cache is not None:
             return self._map_cache
         net = self.net
-        twin = {(s.from_node, s.to_node): s.id for s in net.segments}
         roads = []
         for seg in net.segments:
-            back = twin.get((seg.to_node, seg.from_node))
+            back = net.coincident_twin.get(seg.id)
             if back is not None and back < seg.id:
                 continue
-            lanes_total = seg.lanes if back is None else (seg.lanes + net.segments[back].lanes)
+            lanes_dir = seg.lanes if back is None else max(seg.lanes, net.segments[back].lanes)
+            lanes_total = lanes_dir if back is None else (lanes_dir * 2)
             roads.append(
                 {
                     "id": seg.id,
                     "hwy": seg.highway.replace("_link", ""),
-                    "lanes": seg.lanes,
+                    "lanes": lanes_dir,
                     "total_lanes": lanes_total,
                     "oneway": seg.oneway,
                     "pts": [[round(p[0], 1), round(p[1], 1)] for p in seg.points],

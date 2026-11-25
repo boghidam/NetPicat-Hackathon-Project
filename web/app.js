@@ -37,6 +37,8 @@
   const canvas = $("cityCanvas");
   const ctx = canvas.getContext("2d");
   const workspaceEl = document.querySelector(".workspace");
+  const mapControlsEl = document.querySelector(".map-controls");
+  const drawerInnerEl = $("drawer") ? $("drawer").querySelector(".drawer-inner") : null;
 
   function setMobileTab(tab) {
     state.mobileTab = tab === "impact" ? "impact" : "controls";
@@ -58,11 +60,18 @@
     const drawer = $("drawer");
     drawer.style.height = "";
     drawer.style.transform = "";
+    drawer.classList.remove("dragging");
     drawer.dataset.snap = valid;
     drawer.classList.toggle("collapsed", valid === "peek");
     if (workspaceEl) {
+      workspaceEl.classList.remove("sheet-dragging");
       workspaceEl.classList.toggle("sheet-half", valid === "half");
       workspaceEl.classList.toggle("sheet-full", valid === "full");
+    }
+    if (mapControlsEl) {
+      mapControlsEl.style.bottom = "";
+      mapControlsEl.style.opacity = "";
+      mapControlsEl.style.pointerEvents = "";
     }
     const lbl = $("peekCtrlLabel");
     if (lbl) lbl.textContent = valid === "peek" ? "Controls" : "Map";
@@ -436,9 +445,12 @@
       for (const road of state.map.roads) {
         const lanesDir = road.lanes || 1;
         const totalLanes = road.total_lanes || (road.oneway ? lanesDir : lanesDir * 2);
+        const minW = road.oneway
+          ? (road.hwy.includes("primary") ? 7.0 : road.hwy.includes("secondary") ? 5.8 : 5.0)
+          : (road.hwy.includes("primary") ? 10.5 : road.hwy.includes("secondary") ? 8.8 : 8.4);
         const baseW = Math.max(
-          road.hwy.includes("primary") ? 10.5 : road.hwy.includes("secondary") ? 8.2 : 6.0,
-          totalLanes * 3.35 + (road.oneway ? 1.5 : 2.2)
+          minW,
+          road.oneway ? (totalLanes * 3.35 + 1.5) : (totalLanes * 3.5 + 2.4)
         );
         const w = Math.max(2.2, exag * baseW * sc);
         ctx.beginPath();
@@ -446,8 +458,8 @@
           const [sx, sy] = toScreen(x, y);
           if (idx === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
         });
-        ctx.strokeStyle = pass === 0 ? "#cfdbd3" : "#ffffff";
-        ctx.lineWidth = pass === 0 ? w + 2.4 : w;
+        ctx.strokeStyle = pass === 0 ? "#bccdc2" : "#ffffff";
+        ctx.lineWidth = pass === 0 ? w + 2.8 : w;
         ctx.stroke();
       }
     }
@@ -531,15 +543,6 @@
           ctx.stroke();
           ctx.setLineDash([]);
         }
-
-        // Landscaped civic Forest/Mint Green center island
-        ctx.beginPath();
-        ctx.arc(sx, sy, islandR, 0, Math.PI * 2);
-        ctx.fillStyle = "#c9e6d2";
-        ctx.fill();
-        ctx.strokeStyle = "rgba(20, 83, 45, 0.35)";
-        ctx.lineWidth = 1.1;
-        ctx.stroke();
       }
     }
 
@@ -603,31 +606,114 @@
       }
     }
 
-    // 2. Transit corridors (Green palette!)
+    // 2. Transit corridors (clipped cleanly at roundabout rims + wrapped counterclockwise around roundabout rings)
+    if (!state.map._corridorCache && state.map.seg_geoms) {
+      const rbs = (state.map.roundabouts || []).map((rb) => ({
+        node: rb[0], x: rb[2], y: rb[3], radM: rb[4], ringLanes: rb[5],
+        rRing: rb[5] >= 2 ? (rb[4] - 1.1) : (rb[4] + 0.2),
+      }));
+      const findRbAt = (pt) => rbs.find((rb) => Math.hypot(pt[0] - rb.x, pt[1] - rb.y) <= 2.0) || null;
+      const crossCircle = (ax, ay, bx, by, rb) => {
+        const dx = bx - ax, dy = by - ay;
+        const fx = ax - rb.x, fy = ay - rb.y;
+        const a = dx * dx + dy * dy;
+        if (a < 1e-9) return null;
+        const b = 2 * (fx * dx + fy * dy);
+        const c = fx * fx + fy * fy - rb.rRing * rb.rRing;
+        const disc = b * b - 4 * a * c;
+        if (disc < 0) return null;
+        const sq = Math.sqrt(disc);
+        const t1 = (-b - sq) / (2 * a);
+        const t2 = (-b + sq) / (2 * a);
+        for (const t of [t2, t1]) {
+          if (t >= 0 && t <= 1) return [ax + t * dx, ay + t * dy];
+        }
+        return null;
+      };
+      const segTrim = {};
+      for (const [sid, rawPts] of Object.entries(state.map.seg_geoms)) {
+        if (!rawPts || rawPts.length < 2) continue;
+        let pts = rawPts;
+        let startRb = null, startAng = 0, endRb = null, endAng = 0;
+        const rb0 = findRbAt(pts[0]);
+        if (rb0) {
+          let i = 0;
+          while (i < pts.length - 1 && Math.hypot(pts[i + 1][0] - rb0.x, pts[i + 1][1] - rb0.y) < rb0.rRing) i++;
+          if (i < pts.length - 1) {
+            const hit = crossCircle(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1], rb0) || pts[i + 1];
+            pts = [hit, ...pts.slice(i + 1)];
+            startRb = rb0;
+            startAng = Math.atan2(hit[1] - rb0.y, hit[0] - rb0.x);
+          }
+        }
+        const rb1 = findRbAt(pts[pts.length - 1]);
+        if (rb1 && pts.length >= 2) {
+          let i = pts.length - 1;
+          while (i > 0 && Math.hypot(pts[i - 1][0] - rb1.x, pts[i - 1][1] - rb1.y) < rb1.rRing) i--;
+          if (i > 0) {
+            const hit = crossCircle(pts[i - 1][0], pts[i - 1][1], pts[i][0], pts[i][1], rb1) || pts[i - 1];
+            pts = [...pts.slice(0, i), hit];
+            endRb = rb1;
+            endAng = Math.atan2(hit[1] - rb1.y, hit[0] - rb1.x);
+          }
+        }
+        segTrim[sid] = { pts, startRb, startAng, endRb, endAng };
+      }
+      const routeArcs = (state.map.routes || []).map((r) => {
+        const arcs = [];
+        const es = r.edges || [];
+        for (let i = 0; i < es.length; i++) {
+          const cur = segTrim[es[i]];
+          const nxt = segTrim[es[(i + 1) % es.length]];
+          if (cur && nxt && cur.endRb && nxt.startRb && cur.endRb.node === nxt.startRb.node) {
+            arcs.push({ rb: cur.endRb, aIn: cur.endAng, aOut: nxt.startAng });
+          }
+        }
+        return arcs;
+      });
+      state.map._corridorCache = { segTrim, routeArcs };
+    }
+
     if (state.showRoutes) {
+      const { segTrim, routeArcs } = state.map._corridorCache;
       ctx.lineWidth = Math.max(1.2, 2.0 * sc);
-      for (const r of state.map.routes) {
+      state.map.routes.forEach((r, rIdx) => {
         ctx.strokeStyle = r.backbone
           ? "rgba(22, 163, 74, 0.34)"
           : (r.metropolitan ? "rgba(132, 204, 22, 0.24)" : "rgba(20, 83, 45, 0.20)");
         ctx.beginPath();
         for (const sid of r.edges) {
-          const pts = state.map.seg_geoms[sid];
-          if (!pts || pts.length < 2) continue;
-          pts.forEach(([x, y], idx) => {
+          const info = segTrim[sid];
+          if (!info || info.pts.length < 2) continue;
+          info.pts.forEach(([x, y], idx) => {
             const [sx, sy] = toScreen(x, y);
             if (idx === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
           });
         }
+        for (const arc of routeArcs[rIdx] || []) {
+          const [rx, ry] = toScreen(arc.rb.x, arc.rb.y);
+          const outerR = Math.max(7.5, (arc.rb.radM + 2.5) * sc);
+          const ringW = Math.max(3.5, (arc.rb.ringLanes >= 2 ? 7.2 : 4.6) * sc);
+          const rr = outerR - ringW * 0.5;
+          const diff = Math.abs(((arc.aOut - arc.aIn + Math.PI * 3) % (Math.PI * 2)) - Math.PI);
+          if (diff < 0.04) {
+            ctx.moveTo(rx + rr * Math.cos(-arc.aIn), ry + rr * Math.sin(-arc.aIn));
+            ctx.arc(rx, ry, rr, -arc.aIn, -arc.aIn + Math.PI * 2, false);
+          } else {
+            ctx.moveTo(rx + rr * Math.cos(-arc.aIn), ry + rr * Math.sin(-arc.aIn));
+            ctx.arc(rx, ry, rr, -arc.aIn, -arc.aOut, true);
+          }
+        }
         ctx.stroke();
-      }
+      });
     }
 
     if (f) {
       // 3. Optional bus-inferred congestion heat overlay
       if (state.showHeat && f.heat) {
+        const segTrim = state.map._corridorCache ? state.map._corridorCache.segTrim : null;
         for (const [sid, load] of f.heat) {
-          const pts = state.map.seg_geoms[sid];
+          const pts = (segTrim && segTrim[sid] && segTrim[sid].pts) || state.map.seg_geoms[sid];
           if (!pts) continue;
           ctx.beginPath();
           pts.forEach(([x, y], i) => {
@@ -639,6 +725,28 @@
           ctx.stroke();
         }
       }
+    }
+
+    // 3.5. Landscaped Roundabout Center Islands (drawn above corridor/heat overlays so islands stay pristine)
+    if (state.map.roundabouts && state.map.roundabouts.length) {
+      for (const rb of state.map.roundabouts) {
+        const [, , rx, ry, radM, ringLanes] = rb;
+        const [sx, sy] = toScreen(rx, ry);
+        if (sx < -60 || sx > W + 60 || sy < -60 || sy > H + 60) continue;
+        const outerR = Math.max(7.5, (radM + 2.5) * sc);
+        const ringW = Math.max(3.5, (ringLanes >= 2 ? 7.2 : 4.6) * sc);
+        const islandR = Math.max(2.6, outerR - ringW);
+        ctx.beginPath();
+        ctx.arc(sx, sy, islandR, 0, Math.PI * 2);
+        ctx.fillStyle = "#c9e6d2";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(20, 83, 45, 0.35)";
+        ctx.lineWidth = 1.1;
+        ctx.stroke();
+      }
+    }
+
+    if (f) {
 
       // 4. Signal Stop Lines
       if (sc > 0.08 && f.signals) {
@@ -1229,10 +1337,12 @@
       if (state.mobileSnap === "peek") setMobileSnap("full");
     };
 
-    // Touch Swipe-to-Resize on Mobile Bottom Sheet Header (resizes height directly so scroll never bleeds)
+    // Drag-to-Resize on Mobile Bottom Sheet (works via touch OR pointer/mouse anywhere on #sheetHeader, plus pull-down from top of .drawer-inner)
     const sheetHeader = $("sheetHeader");
     const drawerEl = $("drawer");
     let sheetDrag = null;
+    let suppressClickUntil = 0;
+    let lastTouchMs = 0;
 
     const snapHeights = () => {
       const vh = window.innerHeight || 700;
@@ -1242,27 +1352,56 @@
       return { peek: peekH, half: halfH, full: fullH };
     };
 
-    sheetHeader.addEventListener("touchstart", (e) => {
-      if (!isMobile() || e.touches.length !== 1) return;
-      if (e.target.closest("button")) return;
+    const syncMapControlsDuringDrag = (h, hs) => {
+      if (!mapControlsEl) return;
+      if (h <= hs.half) {
+        mapControlsEl.style.bottom = `${Math.round(h + 10)}px`;
+        mapControlsEl.style.opacity = "1";
+        mapControlsEl.style.pointerEvents = "";
+      } else {
+        const span = Math.max(40, hs.full - hs.half);
+        const fade = Math.max(0, 1 - (h - hs.half) / span);
+        mapControlsEl.style.bottom = `${Math.round(hs.half + 10)}px`;
+        mapControlsEl.style.opacity = fade.toFixed(2);
+        mapControlsEl.style.pointerEvents = fade < 0.2 ? "none" : "";
+      }
+    };
+
+    const beginSheetDrag = (x, y, startedOnButton, fromInner = false) => {
       const hs = snapHeights();
       sheetDrag = {
-        startY: e.touches[0].clientY,
+        startX: x,
+        startY: y,
         startH: drawerEl.offsetHeight || hs[state.mobileSnap] || hs.peek,
-        lastY: e.touches[0].clientY,
+        lastY: y,
         lastT: Date.now(),
         vel: 0,
         moved: false,
+        cancelled: false,
+        startedOnButton,
+        fromInner,
       };
-    }, { passive: true });
+    };
 
-    sheetHeader.addEventListener("touchmove", (e) => {
-      if (!sheetDrag || e.touches.length !== 1) return;
-      const y = e.touches[0].clientY;
+    const moveSheetDrag = (x, y, ev) => {
+      if (!sheetDrag || sheetDrag.cancelled) return;
+      const dx = x - sheetDrag.startX;
       const dy = y - sheetDrag.startY;
-      if (Math.abs(dy) > 6) sheetDrag.moved = true;
-      if (!sheetDrag.moved) return;
-      e.preventDefault();
+      if (!sheetDrag.moved) {
+        if (sheetDrag.fromInner) {
+          // Only hijack inner scroll when user pulls down at scrollTop <= 0
+          if (Math.abs(dx) > 8 && Math.abs(dx) > Math.abs(dy)) { sheetDrag.cancelled = true; return; }
+          if (dy < -6 || (drawerInnerEl && drawerInnerEl.scrollTop > 0)) { sheetDrag.cancelled = true; return; }
+          if (dy <= 10) return;
+        } else {
+          if (Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy) * 1.2) { sheetDrag.cancelled = true; return; }
+          if (Math.abs(dy) <= 8 || Math.abs(dy) < Math.abs(dx)) return;
+        }
+        sheetDrag.moved = true;
+        drawerEl.classList.add("dragging");
+        if (workspaceEl) workspaceEl.classList.add("sheet-dragging");
+      }
+      if (ev && ev.cancelable) ev.preventDefault();
       const now = Date.now();
       const dt = Math.max(1, now - sheetDrag.lastT);
       sheetDrag.vel = (y - sheetDrag.lastY) / dt;
@@ -1270,27 +1409,32 @@
       sheetDrag.lastT = now;
       const hs = snapHeights();
       const nextH = Math.max(hs.peek, Math.min(hs.full, sheetDrag.startH - dy));
-      drawerEl.classList.add("dragging");
       drawerEl.style.height = `${Math.round(nextH)}px`;
-    }, { passive: false });
+      syncMapControlsDuringDrag(nextH, hs);
+    };
 
     const finishSheetDrag = () => {
       if (!sheetDrag) return;
       const drag = sheetDrag;
       sheetDrag = null;
       drawerEl.classList.remove("dragging");
+      if (workspaceEl) workspaceEl.classList.remove("sheet-dragging");
+      if (drag.cancelled) return;
       if (!drag.moved) {
-        // Simple tap on drag handle cycles Peek -> Half -> Full -> Peek
-        const next = state.mobileSnap === "peek" ? "half" : (state.mobileSnap === "half" ? "full" : "peek");
-        setMobileSnap(next);
+        // Let button taps trigger their own onclick; tap on non-button drag zone toggles peek/half
+        if (!drag.startedOnButton && !drag.fromInner) {
+          const next = state.mobileSnap === "peek" ? "half" : (state.mobileSnap === "half" ? "full" : "peek");
+          setMobileSnap(next);
+        }
         return;
       }
+      suppressClickUntil = Date.now() + 350;
       const hs = snapHeights();
       const curH = Math.max(hs.peek, Math.min(hs.full, drag.startH - (drag.lastY - drag.startY)));
-      if (drag.vel < -0.45) {
-        setMobileSnap(state.mobileSnap === "peek" ? "half" : "full");
-      } else if (drag.vel > 0.45) {
-        setMobileSnap(state.mobileSnap === "full" ? "half" : "peek");
+      if (drag.vel < -0.35) {
+        setMobileSnap(curH > (hs.half + hs.full) * 0.5 || state.mobileSnap === "half" ? "full" : "half");
+      } else if (drag.vel > 0.35) {
+        setMobileSnap(curH < (hs.peek + hs.half) * 0.5 || state.mobileSnap === "half" ? "peek" : "half");
       } else {
         const choices = [
           ["full", Math.abs(curH - hs.full)],
@@ -1301,8 +1445,61 @@
         setMobileSnap(choices[0][0]);
       }
     };
+
+    // Suppress trailing synthetic click after a finger drag started on a header button/tab
+    sheetHeader.addEventListener("click", (e) => {
+      if (Date.now() < suppressClickUntil) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    }, true);
+
+    sheetHeader.addEventListener("touchstart", (e) => {
+      if (!isMobile() || e.touches.length !== 1) return;
+      lastTouchMs = Date.now();
+      const t = e.touches[0];
+      beginSheetDrag(t.clientX, t.clientY, !!e.target.closest("button"), false);
+    }, { passive: true });
+    sheetHeader.addEventListener("touchmove", (e) => {
+      if (!sheetDrag || e.touches.length !== 1) return;
+      moveSheetDrag(e.touches[0].clientX, e.touches[0].clientY, e);
+    }, { passive: false });
     sheetHeader.addEventListener("touchend", finishSheetDrag);
     sheetHeader.addEventListener("touchcancel", finishSheetDrag);
+
+    // Mouse drag fallback on #sheetHeader for mobile emulation & touch-capable laptops
+    sheetHeader.addEventListener("mousedown", (e) => {
+      if (!isMobile() || e.button !== 0 || Date.now() - lastTouchMs < 500) return;
+      beginSheetDrag(e.clientX, e.clientY, !!e.target.closest("button"), false);
+    });
+    window.addEventListener("mousemove", (e) => {
+      if (sheetDrag) moveSheetDrag(e.clientX, e.clientY, e);
+    });
+    window.addEventListener("mouseup", () => {
+      if (sheetDrag) finishSheetDrag();
+    });
+
+    // Pull down on .drawer-inner when scrolled to top to collapse half/full sheet naturally
+    if (drawerInnerEl) {
+      drawerInnerEl.addEventListener("touchstart", (e) => {
+        if (!isMobile() || state.mobileSnap === "peek" || e.touches.length !== 1) return;
+        if (e.target.closest("input, select, option")) return;
+        if (drawerInnerEl.scrollTop <= 0) {
+          lastTouchMs = Date.now();
+          beginSheetDrag(e.touches[0].clientX, e.touches[0].clientY, !!e.target.closest("button"), true);
+        }
+      }, { passive: true });
+      drawerInnerEl.addEventListener("touchmove", (e) => {
+        if (!sheetDrag || !sheetDrag.fromInner || e.touches.length !== 1) return;
+        moveSheetDrag(e.touches[0].clientX, e.touches[0].clientY, e);
+      }, { passive: false });
+      drawerInnerEl.addEventListener("touchend", () => {
+        if (sheetDrag && sheetDrag.fromInner) finishSheetDrag();
+      });
+      drawerInnerEl.addEventListener("touchcancel", () => {
+        if (sheetDrag && sheetDrag.fromInner) finishSheetDrag();
+      });
+    }
 
     // Mode Switcher: Aether (Simulation) | Terra (Real)
     const switchMode = async (mode) => {

@@ -182,12 +182,11 @@
         minY = Math.min(minY, n.y); maxY = Math.max(maxY, n.y);
       });
 
-      const twin = new Map();
+      const byUV = new Map();
       this.citySegSet = new Set();
       this.segs = core.edges.map((e) => {
         nodeMap.get(e.v).inCount += 1;
         nodeMap.get(e.u).outCount += 1;
-        twin.set(`${e.u}:${e.v}`, e.id);
         const pts = e.geometry.map(([lon, lat]) => toXY(lat, lon));
         const cum = [0];
         for (let i = 1; i < pts.length; i++) {
@@ -203,12 +202,29 @@
           pts, cum,
         };
         this.outEdges[e.u].push(seg);
+        const uvKey = `${e.u}:${e.v}`;
+        if (!byUV.has(uvKey)) byUV.set(uvKey, []);
+        byUV.get(uvKey).push(seg);
         const mid = pts[Math.floor(pts.length / 2)];
         if (Math.hypot(mid[0] - cityCx, mid[1] - cityCy) <= this.urbanRadius) {
           this.citySegSet.add(seg.id);
         }
         return seg;
       });
+
+      const coincidentTwin = new Map();
+      for (const s of this.segs) {
+        if (coincidentTwin.has(s.id)) continue;
+        const revs = byUV.get(`${s.v}:${s.u}`) || [];
+        for (const rev of revs) {
+          if (coincidentTwin.has(rev.id)) continue;
+          if (this._polylinesCoincide(s.pts, rev.pts, 2.5)) {
+            coincidentTwin.set(s.id, rev.id);
+            coincidentTwin.set(rev.id, s.id);
+            break;
+          }
+        }
+      }
 
       // Perimeter gates matching smartcity/network.py (_choose_gates)
       const band = 700.0;
@@ -275,7 +291,7 @@
 
       this.segs.forEach((s) => {
         s.lanes = Math.max(1, Math.min(3, Number(edgeLanes[String(s.id)] || 1)));
-        s.oneway = !twin.has(`${s.v}:${s.u}`);
+        s.oneway = !coincidentTwin.has(s.id);
         s.gradePct = Number(edgeGrades[String(s.id)] || 0);
         const rbi = rbByNodeRaw.get(s.v);
         if (rbi) s.stopPos = s.length - Math.min(Number(rbi.radius_m) + 4.5, 0.42 * s.length);
@@ -355,16 +371,21 @@
       const gateSet = new Set(this.gates);
       this.segs.forEach((s) => {
         segGeoms[s.id] = s.pts.map(([x, y]) => [Math.round(x * 10) / 10, Math.round(y * 10) / 10]);
-        const back = twin.get(`${s.v}:${s.u}`);
+        const back = coincidentTwin.get(s.id);
         if (back === undefined || back >= s.id) {
-          const totalLanes = back === undefined ? s.lanes : (s.lanes + this.segs[back].lanes);
-          roads.push({ id: s.id, hwy: s.hwy, lanes: s.lanes, total_lanes: totalLanes, oneway: s.oneway, pts: segGeoms[s.id] });
+          const lanesDir = back === undefined ? s.lanes : Math.max(s.lanes, this.segs[back].lanes);
+          const totalLanes = back === undefined ? lanesDir : (lanesDir * 2);
+          roads.push({ id: s.id, hwy: s.hwy, lanes: lanesDir, total_lanes: totalLanes, oneway: s.oneway, pts: segGeoms[s.id] });
         }
         const rbTarget = this.roundaboutByNode.get(s.v);
         const isSigNode = rbTarget ? rbTarget.signalized : (nodeMap.get(s.v).inCount >= 3 && !gateSet.has(s.v) && !this.yieldNodes.has(s.v));
         if (isSigNode) {
           const [x, y, dx, dy] = this._posOnSeg(s, s.stopPos);
-          stopLines[s.id] = [x - dy * 4.2, y + dx * 4.2, x + dy * 4.2, y - dx * 4.2];
+          const midLane = ((s.lanes || 1) - 1) * 0.5;
+          const off = this._laneOffset(s, midLane);
+          const sx = x + dy * off, sy = y - dx * off;
+          const half = Math.max(2.2, (s.lanes || 1) * 1.55);
+          stopLines[s.id] = [sx - dy * half, sy + dx * half, sx + dy * half, sy - dx * half];
           this.signals.set(s.id, { phaseOffset: (s.v * 7 + (s.id % 2) * 25) % 50, state: "G" });
         }
       });
@@ -408,9 +429,29 @@
       };
     }
 
+    _polylinesCoincide(ptsA, ptsB, tolM = 2.5) {
+      if (!ptsA || !ptsB || ptsA.length < 2 || ptsB.length < 2) return false;
+      const tol2 = tolM * tolM;
+      const minDist2 = (px, py, poly) => {
+        let best = Infinity;
+        for (let i = 0; i < poly.length - 1; i++) {
+          const ax = poly[i][0], ay = poly[i][1];
+          const dx = poly[i + 1][0] - ax, dy = poly[i + 1][1] - ay;
+          const l2 = dx * dx + dy * dy;
+          const t = l2 > 1e-12 ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / l2)) : 0;
+          const d2 = (px - (ax + t * dx)) ** 2 + (py - (ay + t * dy)) ** 2;
+          if (d2 < best) best = d2;
+        }
+        return best;
+      };
+      for (const [px, py] of ptsA) if (minDist2(px, py, ptsB) > tol2) return false;
+      for (const [px, py] of ptsB) if (minDist2(px, py, ptsA) > tol2) return false;
+      return true;
+    }
+
     _laneOffset(seg, laneV) {
       const n = seg.lanes || 1;
-      if (n <= 1) return 3.0;
+      if (n <= 1) return seg.oneway ? 0.0 : 3.0;
       if (seg.oneway) return ((n - 1) * 0.5 - laneV) * 3.1;
       return 1.9 + (n - 1 - laneV) * 3.1;
     }

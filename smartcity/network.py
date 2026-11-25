@@ -87,6 +87,34 @@ def compass(angle_math: float) -> str:
     return COMPASS[int((bearing + 22.5) // 45) % 8]
 
 
+def _pt_seg_dist2(px: float, py: float, ax: float, ay: float, bx: float, by: float) -> float:
+    dx, dy = bx - ax, by - ay
+    l2 = dx * dx + dy * dy
+    if l2 <= 1e-12:
+        return (px - ax) ** 2 + (py - ay) ** 2
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / l2))
+    qx, qy = ax + t * dx, ay + t * dy
+    return (px - qx) ** 2 + (py - qy) ** 2
+
+
+def polylines_coincide(
+    pts_a: tuple[tuple[float, float], ...],
+    pts_b: tuple[tuple[float, float], ...],
+    tol_m: float = 2.5,
+) -> bool:
+    """True iff two polylines physically share the same road centerline (max vertex-to-polyline distance <= tol_m)."""
+    if len(pts_a) < 2 or len(pts_b) < 2:
+        return False
+    tol2 = tol_m * tol_m
+    for px, py in pts_a:
+        if min(_pt_seg_dist2(px, py, a[0], a[1], b[0], b[1]) for a, b in zip(pts_b, pts_b[1:], strict=False)) > tol2:
+            return False
+    for px, py in pts_b:
+        if min(_pt_seg_dist2(px, py, a[0], a[1], b[0], b[1]) for a, b in zip(pts_a, pts_a[1:], strict=False)) > tol2:
+            return False
+    return True
+
+
 # ---------------------------------------------------------------------------- model
 @dataclass(frozen=True)
 class Intersection:
@@ -255,6 +283,25 @@ class RoadNetwork:
         self.rail_crossings: list[RailCrossing] = []
         self.rail_by_seg: dict[int, RailCrossing] = {}
         self.hospitals: list[Hospital] = []
+        self.coincident_twin: dict[int, int] = self._find_coincident_twins()
+
+    def _find_coincident_twins(self, tol_m: float = 2.5) -> dict[int, int]:
+        """Map each directed segment to its opposite-direction twin ONLY when both share the same centerline."""
+        by_uv: dict[tuple[int, int], list[Segment]] = {}
+        for seg in self.segments:
+            by_uv.setdefault((seg.from_node, seg.to_node), []).append(seg)
+        twins: dict[int, int] = {}
+        for seg in self.segments:
+            if seg.id in twins:
+                continue
+            for rev in by_uv.get((seg.to_node, seg.from_node), ()):
+                if rev.id in twins:
+                    continue
+                if polylines_coincide(seg.points, rev.points, tol_m=tol_m):
+                    twins[seg.id] = rev.id
+                    twins[rev.id] = seg.id
+                    break
+        return twins
 
     def apply_realism(self, data: dict) -> None:
         """Apply multi-lane, roundabout, yield-junction, CTP bus-stop, hill-grade, and crosswalk metadata."""
@@ -266,12 +313,13 @@ class RoadNetwork:
         yield_set = {int(n) for n in (data.get("yield_nodes") or [])}
         rb_by_node_raw = {int(r["node"]): r for r in rb_raw}
 
-        # Identify one-way vs two-way directed pairs
-        edge_pairs = {(s.from_node, s.to_node) for s in self.segments}
+        # Only segments sharing a physical centerline with an opposite twin are 2-way;
+        # physically separated dual carriageways (6-67 m apart in OSM) and pure one-way roads are 1-way carriageways.
+        self.coincident_twin = self._find_coincident_twins()
         new_segs: list[Segment] = []
         for seg in self.segments:
             lanes = max(1, min(3, int(edge_lanes.get(str(seg.id), seg.lanes))))
-            oneway = (seg.to_node, seg.from_node) not in edge_pairs
+            oneway = seg.id not in self.coincident_twin
             grade = float(edge_grades.get(str(seg.id), 0.0))
             stop_pos = seg.stop_pos
             rb_info = rb_by_node_raw.get(seg.to_node)
@@ -598,8 +646,6 @@ class RoadNetwork:
             cum.append(cum[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
         scale = e.length / cum[-1] if cum[-1] > 0 else 1.0
         cum = [c * scale for c in cum]
-        x0, y0 = pts[0]
-        pts = [(x0 + (x - x0) * scale, y0 + (y - y0) * scale) for x, y in pts]
 
         def heading_at(start: float, end: float) -> float:
             (xa, ya), (xb, yb) = self._interp(pts, cum, start), self._interp(pts, cum, end)
@@ -755,7 +801,7 @@ class RoadNetwork:
         """Lateral offset (m to the right of centerline) for `lane` (0 = outer/curb, n-1 = inner/left)."""
         n = seg.lanes
         if n <= 1:
-            return self.cfg.lane_offset
+            return 0.0 if seg.oneway else self.cfg.lane_offset
         w = self.cfg.lane_width
         if seg.oneway:
             return ((n - 1) * 0.5 - lane) * w
