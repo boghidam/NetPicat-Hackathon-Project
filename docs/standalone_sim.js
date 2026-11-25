@@ -1026,7 +1026,7 @@
     }
 
     getFrame() {
-      const slot = this.slots[this.activeSlot] || this.slots.default;
+      const slot = this.slots[this.activeSlot] || this.slots.default || {};
       const meta = slot.metadata || {};
       const out = (slot.policy && slot.policy.outcomes) || {};
       const dec = ((out.BUS_HOLD && out.BUS_HOLD.decisive) || 438) + ((out.LOCAL_EXTEND && out.LOCAL_EXTEND.decisive) || 6);

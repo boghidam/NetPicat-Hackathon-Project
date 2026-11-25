@@ -35,15 +35,32 @@
 html, body {
   width: 100%;
   height: 100%;
+  height: 100dvh;
   overflow: hidden;
+  overflow: clip;
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   background: var(--pearl-white);
   color: var(--ink);
   -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none;
+}
+
+button, select, input {
+  -webkit-tap-highlight-color: transparent;
 }
 
 .hidden {
   display: none !important;
+}
+
+.mobile-only {
+  display: none !important;
+}
+
+.mode-label-short,
+.slot-ic,
+.api-ic {
+  display: none;
 }
 
 /* ==================== TOP BAR (Bottle Green) ==================== */
@@ -281,6 +298,15 @@ html, body {
   cursor: pointer;
 }
 
+.pop-action.primary-soft {
+  background: var(--mint-soft);
+  color: var(--forest-green);
+}
+
+.pop-action.primary-soft:hover {
+  background: #d5f0de;
+}
+
 .pop-action.danger-soft {
   background: #fef2f2;
   color: #b91c1c;
@@ -295,7 +321,9 @@ html, body {
   position: relative;
   width: 100%;
   height: calc(100vh - var(--topbar-h));
+  height: calc(100dvh - var(--topbar-h));
   overflow: hidden;
+  overflow: clip;
 }
 
 .map-wrap {
@@ -309,6 +337,9 @@ html, body {
   height: 100%;
   display: block;
   cursor: grab;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 #cityCanvas:active {
@@ -808,12 +839,34 @@ html, body {
   gap: 6px;
 }
 
+.st-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  padding-bottom: 5px;
+}
+
 .st-title {
   font-size: 12.5px;
   font-weight: 700;
   color: #bbf7d0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
-  padding-bottom: 5px;
+}
+
+.st-close {
+  border: none;
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--snow-white);
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  font-size: 16px;
+  line-height: 1;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
 }
 
 .st-row {
@@ -1270,4 +1323,642 @@ html, body {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 5px;
+}
+
+/* ==================== PHONE / MOBILE LAYOUT (<= 768px) ==================== */
+@media (max-width: 768px) {
+  :root {
+    --topbar-h: calc(52px + env(safe-area-inset-top, 0px));
+    --sheet-peek-h: calc(68px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .mobile-only {
+    display: flex !important;
+  }
+
+  .mobile-legend-card.mobile-only {
+    display: block !important;
+  }
+
+  /* Compact Single-Row Top Bar (zero overflow even on 320px-360px phones) */
+  .topbar {
+    padding: env(safe-area-inset-top, 0px) 10px 0;
+    gap: 6px;
+  }
+
+  .brand {
+    gap: 0;
+    flex-shrink: 0;
+  }
+
+  .brand-logo {
+    height: 28px;
+  }
+
+  .brand-title {
+    display: none;
+  }
+
+  .mode-switch {
+    padding: 2px;
+    gap: 2px;
+    flex-shrink: 0;
+  }
+
+  .mode-label-full {
+    display: none;
+  }
+
+  .mode-label-short {
+    display: inline;
+  }
+
+  .mode-pill {
+    padding: 6px 13px;
+    font-size: 12.5px;
+  }
+
+  .topbar-actions {
+    gap: 5px;
+    flex-shrink: 0;
+  }
+
+  .top-btn {
+    height: 36px;
+    padding: 0 9px;
+    font-size: 12px;
+    gap: 5px;
+    border-radius: 9px;
+  }
+
+  #btnNewSlot {
+    display: none;
+  }
+
+  .slot-ic,
+  .api-ic {
+    display: inline-block;
+    width: 15px;
+    height: 15px;
+    flex-shrink: 0;
+  }
+
+  .slot-btn {
+    padding: 0 8px;
+    gap: 4px;
+    max-width: 110px;
+  }
+
+  #slotBtnLabel {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 58px;
+  }
+
+  .api-btn {
+    padding: 0 9px;
+    gap: 5px;
+  }
+
+  .api-btn-text {
+    display: none;
+  }
+
+  .icon-btn {
+    width: 36px;
+    padding: 0;
+  }
+
+  /* Full-width floating Slot Popover */
+  .popover {
+    position: fixed;
+    left: 10px;
+    right: 10px;
+    top: calc(var(--topbar-h) + 8px);
+    width: auto;
+    max-width: 360px;
+    margin: 0 auto;
+    border-radius: 16px;
+  }
+
+  .slot-item {
+    padding: 11px 12px;
+    font-size: 14px;
+  }
+
+  .popover-foot {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    padding: 10px;
+  }
+
+  .pop-action {
+    padding: 10px 10px;
+    font-size: 13px;
+    justify-content: center;
+    align-items: center;
+  }
+
+  /* Compact Map Status Chip */
+  .map-status-chip {
+    top: 10px;
+    left: 10px;
+    max-width: calc(100vw - 20px);
+    padding: 5px 10px;
+    font-size: 11.5px;
+    gap: 6px;
+  }
+
+  #mapClockText {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .map-tooltip {
+    max-width: calc(100vw - 24px);
+    white-space: normal;
+    line-height: 1.35;
+    font-size: 12px;
+    padding: 7px 11px;
+  }
+
+  /* Split Map Controls: Layer Pill (bottom-left) + Zoom Stack (bottom-right), riding above the Bottom Sheet */
+  .map-controls {
+    left: 10px;
+    right: 10px;
+    bottom: calc(var(--sheet-peek-h) + 10px);
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: 8px;
+    pointer-events: none;
+    transition: bottom 0.28s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.2s ease;
+  }
+
+  .workspace.sheet-half .map-controls {
+    bottom: calc(52dvh + 10px);
+  }
+
+  .workspace.sheet-full .map-controls {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .zoom-stack,
+  .map-pill-bar {
+    pointer-events: auto;
+  }
+
+  .map-pill-bar {
+    order: 1;
+    padding: 4px;
+    gap: 2px;
+    border-radius: 12px;
+  }
+
+  .map-icon-btn {
+    width: 38px;
+    height: 38px;
+    border-radius: 9px;
+  }
+
+  .map-icon-btn svg {
+    width: 19px;
+    height: 19px;
+  }
+
+  .bar-sep,
+  .legend-items {
+    display: none;
+  }
+
+  .zoom-stack {
+    order: 2;
+    border-radius: 12px;
+  }
+
+  .map-btn {
+    width: 40px;
+    height: 40px;
+    font-size: 22px;
+  }
+
+  /* ==================== NATIVE SWIPEABLE BOTTOM SHEET ==================== */
+  .drawer {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    top: auto;
+    width: 100%;
+    height: var(--sheet-peek-h);
+    max-height: calc(100dvh - var(--topbar-h) - 6px);
+    border-radius: 20px 20px 0 0;
+    border: 1px solid var(--border);
+    border-bottom: none;
+    box-shadow: 0 -8px 30px rgba(15, 61, 46, 0.16);
+    background: rgba(248, 250, 248, 0.98);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    transform: none !important;
+    transition: height 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+    overflow: hidden;
+  }
+
+  .drawer.dragging {
+    transition: none;
+  }
+
+  .drawer[data-snap="peek"],
+  .drawer.collapsed {
+    height: var(--sheet-peek-h);
+  }
+
+  .drawer[data-snap="half"] {
+    height: 52dvh;
+  }
+
+  .drawer[data-snap="full"] {
+    height: 84dvh;
+  }
+
+  .drawer-tab {
+    display: none;
+  }
+
+  /* Bottom Sheet Handle + Live Peek Row + Section Tabs */
+  .sheet-header {
+    flex-direction: column;
+    flex-shrink: 0;
+    background: rgba(248, 250, 248, 0.98);
+    border-bottom: 1px solid var(--border);
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  .drawer[data-snap="peek"] .sheet-header {
+    border-bottom-color: transparent;
+  }
+
+  .sheet-drag-zone {
+    width: 100%;
+    padding: 8px 0 4px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    cursor: grab;
+  }
+
+  .sheet-pill {
+    width: 38px;
+    height: 4px;
+    border-radius: 999px;
+    background: rgba(20, 83, 45, 0.22);
+  }
+
+  .sheet-peek-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 2px 12px 10px;
+    min-height: 48px;
+  }
+
+  .sheet-peek-stats {
+    border: none;
+    background: transparent;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 4px 6px 4px 2px;
+    border-radius: 10px;
+    cursor: pointer;
+    font-family: inherit;
+    color: var(--ink);
+    min-width: 0;
+  }
+
+  .sheet-peek-stats:active {
+    background: var(--mint-soft);
+  }
+
+  .peek-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--kelly-green);
+    box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.2);
+    flex-shrink: 0;
+  }
+
+  .peek-dot.fixed {
+    background: #94a3b8;
+    box-shadow: none;
+  }
+
+  .peek-metric {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 3px;
+    white-space: nowrap;
+  }
+
+  .peek-metric strong {
+    font-size: 16px;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    color: var(--bottle-green);
+  }
+
+  .peek-metric small {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--ink-muted);
+  }
+
+  .peek-sep {
+    color: var(--ink-dim);
+    font-weight: 700;
+  }
+
+  .sheet-peek-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+
+  .peek-icon-btn {
+    width: 36px;
+    height: 36px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--snow-white);
+    color: var(--forest-green);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+  }
+
+  .peek-icon-btn svg {
+    width: 17px;
+    height: 17px;
+  }
+
+  .peek-ctrl-btn {
+    height: 36px;
+    padding: 0 11px 0 12px;
+    border-radius: 10px;
+    border: 1px solid rgba(22, 163, 74, 0.26);
+    background: var(--mint-soft);
+    color: var(--forest-green);
+    font-family: inherit;
+    font-size: 12.5px;
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    cursor: pointer;
+  }
+
+  .peek-chev {
+    width: 14px;
+    height: 14px;
+    transition: transform 0.24s ease;
+  }
+
+  .drawer:not([data-snap="peek"]) .peek-chev {
+    transform: rotate(180deg);
+  }
+
+  /* Mobile Section Tabs (Controls | Impact & Fleet) */
+  .sheet-tabs {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px;
+    margin: 0 12px 10px;
+    padding: 3px;
+    border-radius: 11px;
+    background: var(--ivory-white);
+    border: 1px solid var(--border);
+  }
+
+  .drawer[data-snap="peek"] .sheet-tabs {
+    display: none;
+  }
+
+  .sheet-tab {
+    border: none;
+    background: transparent;
+    padding: 8px 10px;
+    border-radius: 8px;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--ink-muted);
+    cursor: pointer;
+    transition: all 0.16s ease;
+  }
+
+  .sheet-tab.active {
+    background: var(--snow-white);
+    color: var(--forest-green);
+    box-shadow: 0 1px 4px rgba(15, 61, 46, 0.12);
+  }
+
+  /* Mobile Tab Filtering inside Drawer Inner */
+  .drawer[data-mobile-view="controls"] [data-mobile-tab="impact"] {
+    display: none !important;
+  }
+
+  .drawer[data-mobile-view="impact"] [data-mobile-tab="controls"] {
+    display: none !important;
+  }
+
+  .drawer-inner {
+    flex: 1;
+    min-height: 0;
+    padding: 10px 12px calc(22px + env(safe-area-inset-bottom, 0px));
+    gap: 10px;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+  }
+
+  .drawer[data-snap="peek"] .drawer-inner {
+    overflow: hidden;
+    pointer-events: none;
+  }
+
+  /* Comfortable Touch Sizing for Cards & Controls */
+  .card {
+    padding: 12px 13px;
+    border-radius: 14px;
+  }
+
+  .hero-value {
+    font-size: 34px;
+  }
+
+  .kpi-value {
+    font-size: 24px;
+  }
+
+  .value-grid {
+    grid-template-columns: 102px 1fr;
+    gap: 12px;
+  }
+
+  .val-item strong {
+    font-size: 14.5px;
+  }
+
+  .mobile-legend-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding-top: 4px;
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--ink-muted);
+  }
+
+  .seg-btn {
+    padding: 10px 10px;
+    font-size: 13px;
+  }
+
+  .slider-row {
+    font-size: 13px;
+    padding: 2px 0;
+  }
+
+  .slider-row input[type="range"] {
+    height: 28px;
+  }
+
+  .select-wrap select {
+    height: 42px;
+    font-size: 16px;
+    padding: 0 12px;
+  }
+
+  .mini-actions {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px;
+  }
+
+  .mini-btn {
+    height: 40px;
+    font-size: 13px;
+    border-radius: 10px;
+  }
+
+  .w-btn {
+    padding: 9px 6px;
+    font-size: 12.5px;
+  }
+
+  .scenario-row {
+    gap: 7px;
+  }
+
+  .scenario-row .mini-btn {
+    height: 40px;
+    font-size: 12px;
+  }
+
+  /* Stat Tooltip: centered cleanly in upper viewport on mobile tap */
+  .stat-tooltip {
+    left: 12px !important;
+    right: 12px;
+    top: calc(var(--topbar-h) + 12px) !important;
+    width: auto;
+    max-width: 380px;
+    margin: 0 auto;
+    pointer-events: auto;
+    padding: 13px 14px;
+  }
+
+  /* Modals: safe-area & iOS keyboard friendly */
+  .modal-backdrop {
+    padding: 16px 12px;
+    align-items: flex-start;
+    padding-top: max(20px, 10vh);
+  }
+
+  .modal-card {
+    width: 100%;
+    max-width: 400px;
+    max-height: calc(100dvh - 36px);
+    overflow-y: auto;
+    padding: 18px;
+    border-radius: 18px;
+  }
+
+  .field-input {
+    height: 44px;
+    font-size: 16px;
+  }
+
+  .btn-ghost,
+  .btn-primary {
+    height: 42px;
+    font-size: 14px;
+    padding: 0 16px;
+  }
+}
+
+/* Extra-narrow phones (320px - 390px) */
+@media (max-width: 390px) {
+  .mode-pill {
+    padding: 6px 10px;
+    font-size: 12px;
+  }
+
+  #slotBtnLabel {
+    display: none;
+  }
+
+  .slot-btn {
+    padding: 0 8px;
+  }
+
+  .peek-metric strong {
+    font-size: 14.5px;
+  }
+
+  .peek-metric small {
+    font-size: 10.5px;
+  }
+
+  .peek-ctrl-btn {
+    padding: 0 9px 0 10px;
+    font-size: 12px;
+  }
+
+  .map-icon-btn {
+    width: 34px;
+    height: 34px;
+  }
+
+  .map-btn {
+    width: 38px;
+    height: 38px;
+  }
+}
+
+/* Landscape phone (short screen height) */
+@media (max-height: 500px) and (max-width: 960px) {
+  .drawer[data-snap="half"] {
+    height: 62dvh;
+  }
+
+  .workspace.sheet-half .map-controls {
+    opacity: 0;
+    pointer-events: none;
+  }
 }

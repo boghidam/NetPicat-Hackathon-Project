@@ -2,7 +2,8 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f3d2e" />
   <title>Noodle Traffic Control — Iași</title>
   <link rel="icon" type="image/png" href="assets/noodle-logo.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -21,10 +22,10 @@
     <!-- Center Mode Switcher: Aether (Simulation) | Terra (Real) -->
     <div class="mode-switch" role="tablist" aria-label="Operating mode">
       <button id="btnModeAether" class="mode-pill active" role="tab" aria-selected="true">
-        Aether (Simulation)
+        <span class="mode-label-full">Aether (Simulation)</span><span class="mode-label-short" aria-hidden="true">Aether</span>
       </button>
       <button id="btnModeTerra" class="mode-pill" role="tab" aria-selected="false">
-        Terra (Real)
+        <span class="mode-label-full">Terra (Real)</span><span class="mode-label-short" aria-hidden="true">Terra</span>
       </button>
     </div>
 
@@ -32,6 +33,7 @@
     <div class="topbar-actions">
       <div class="slot-wrap">
         <button id="btnSlotMenu" class="top-btn slot-btn" title="Select or manage ML save slots">
+          <svg class="slot-ic" viewBox="0 0 18 18" fill="none" aria-hidden="true"><path d="M9 2.5L2.5 6 9 9.5 15.5 6 9 2.5zM2.5 9.5L9 13l6.5-3.5M2.5 12.5L9 16l6.5-3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
           <span id="slotBtnLabel">Slot: default (15 ep)</span>
           <svg class="chev" viewBox="0 0 16 16" fill="none"><path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
@@ -42,6 +44,7 @@
           </div>
           <div id="slotList" class="slot-list"></div>
           <div class="popover-foot">
+            <button id="btnNewSlotMobile" class="pop-action primary-soft mobile-only" type="button">+ New Slot</button>
             <button id="btnResetActiveSlot" class="pop-action danger-soft">Reset Active Slot</button>
           </div>
         </div>
@@ -50,7 +53,8 @@
       <button id="btnNewSlot" class="top-btn" title="Create a new clean ML slot">+ New</button>
 
       <button id="btnApiKey" class="top-btn api-btn" title="Configure Tranzy / CTP API Key">
-        <span>API Key</span>
+        <svg class="api-ic" viewBox="0 0 18 18" fill="none" aria-hidden="true"><circle cx="6.2" cy="9" r="3.2" stroke="currentColor" stroke-width="1.5"/><path d="M9.4 9H16M13.5 9v2.3M15.5 9v1.7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        <span class="api-btn-text">API Key</span>
         <span id="apiDot" class="status-dot"></span>
       </button>
 
@@ -107,14 +111,42 @@
       </div>
     </div>
 
-    <!-- COLLAPSIBLE FLOATING RIGHT DRAWER (Rounded Left Corners) -->
-    <aside id="drawer" class="drawer" aria-label="Executive Impact Panel">
+    <!-- COLLAPSIBLE FLOATING RIGHT DRAWER (Desktop) / SWIPEABLE BOTTOM SHEET (Mobile) -->
+    <aside id="drawer" class="drawer" data-snap="peek" data-mobile-view="controls" aria-label="Executive Impact Panel">
       <button id="btnDrawerTab" class="drawer-tab" title="Collapse / expand panel" aria-label="Collapse panel">
         <svg id="drawerChevron" viewBox="0 0 16 16" fill="none"><path d="M6.5 4l4 4-4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </button>
 
+      <!-- MOBILE BOTTOM SHEET HANDLE & PEEK BAR (hidden on desktop) -->
+      <div id="sheetHeader" class="sheet-header mobile-only">
+        <div id="sheetDragZone" class="sheet-drag-zone" aria-label="Drag to resize panel">
+          <span class="sheet-pill"></span>
+        </div>
+        <div class="sheet-peek-row">
+          <button id="btnPeekImpact" class="sheet-peek-stats" type="button" title="View Executive Impact">
+            <span id="peekDot" class="peek-dot"></span>
+            <span class="peek-metric"><strong id="peekDelay">-14.2%</strong> <small>Delay</small></span>
+            <span class="peek-sep">&middot;</span>
+            <span class="peek-metric"><strong id="peekFlow">85%</strong> <small>Flow</small></span>
+          </button>
+          <div class="sheet-peek-actions">
+            <button id="btnPeekPause" class="peek-icon-btn" type="button" title="Pause / Resume simulation" aria-label="Pause or resume simulation">
+              <svg id="peekPauseIcon" viewBox="0 0 18 18" fill="none"><rect x="4.5" y="3.5" width="3" height="11" rx="1" fill="currentColor"/><rect x="10.5" y="3.5" width="3" height="11" rx="1" fill="currentColor"/></svg>
+            </button>
+            <button id="btnPeekControls" class="peek-ctrl-btn" type="button">
+              <span id="peekCtrlLabel">Controls</span>
+              <svg class="peek-chev" viewBox="0 0 16 16" fill="none"><path d="M4 10l4-4 4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="sheet-tabs" role="tablist" aria-label="Panel sections">
+          <button id="tabMobileControls" class="sheet-tab active" role="tab" aria-selected="true" type="button">Controls</button>
+          <button id="tabMobileImpact" class="sheet-tab" role="tab" aria-selected="false" type="button">Impact &amp; Fleet</button>
+        </div>
+      </div>
+
       <div class="drawer-inner">
-        <div class="drawer-head">
+        <div class="drawer-head" data-mobile-tab="impact">
           <h2>Executive Impact</h2>
           <span id="statusBadge" class="status-pill adaptive">
             <i class="dot"></i>
@@ -123,7 +155,7 @@
         </div>
 
         <!-- Hero Metric Card -->
-        <section class="card hero-card tip-target" data-tip="delay_reduced">
+        <section class="card hero-card tip-target" data-tip="delay_reduced" data-mobile-tab="impact">
           <div class="card-label-row">
             <span class="card-label" id="heroLabel">Bus Delay Reduced</span>
             <span class="info-ic" aria-hidden="true">i</span>
@@ -132,7 +164,7 @@
         </section>
 
         <!-- Secondary KPI Row -->
-        <section class="kpi-pair">
+        <section class="kpi-pair" data-mobile-tab="impact">
           <div class="card kpi-card tip-target" data-tip="predicted_flow">
             <div class="card-label-row">
               <span class="card-label">Predicted Flow</span>
@@ -152,7 +184,7 @@
         </section>
 
         <!-- Municipal Value Comparison Card -->
-        <section class="card value-card">
+        <section class="card value-card" data-mobile-tab="impact">
           <div class="card-label">Municipal Value</div>
           <div class="value-grid">
             <div class="bar-chart tip-target" data-tip="municipal_bars">
@@ -183,7 +215,7 @@
         </section>
 
         <!-- Fleet Status Strip (51 Lines + Layovers/Breaks) -->
-        <section class="card fleet-card tip-target" data-tip="fleet_status">
+        <section class="card fleet-card tip-target" data-tip="fleet_status" data-mobile-tab="impact">
           <div class="fleet-row">
             <span class="fleet-title" id="fleetTitle">CTP Iași Fleet (51 Lines) <i class="info-ic sm">i</i></span>
             <span class="fleet-total" id="fleetTotal">158 buses</span>
@@ -195,8 +227,18 @@
           </div>
         </section>
 
+        <!-- Mobile-only Map Legend inside Impact tab -->
+        <section class="card mobile-legend-card mobile-only" data-mobile-tab="impact">
+          <div class="card-label">Map Legend</div>
+          <div class="mobile-legend-row">
+            <span class="leg"><i class="leg-bus"></i>CTP Bus</span>
+            <span class="leg"><i class="leg-rest"></i>Layover</span>
+            <span class="leg"><i class="leg-hold"></i>Signal Hold</span>
+          </div>
+        </section>
+
         <!-- AETHER QUICK CONTROLS -->
-        <section id="aetherControls" class="card controls-card">
+        <section id="aetherControls" class="card controls-card" data-mobile-tab="controls">
           <div class="card-label">Quick Controls</div>
 
           <div class="seg-control">
@@ -246,7 +288,7 @@
         </section>
 
         <!-- TERRA LIVE CONTROLS & AI ADVISORIES -->
-        <section id="terraControls" class="card controls-card hidden">
+        <section id="terraControls" class="card controls-card hidden" data-mobile-tab="controls">
           <div class="card-label">Terra Live Feed (Tranzy API)</div>
           <div id="terraStatusBox" class="terra-status">
             Configure your Tranzy API key to stream live CTP Iași vehicles.
@@ -269,7 +311,10 @@
 
   <!-- STRUCTURED HOVER STAT TOOLTIP (floats cleanly to the left of the Executive Drawer) -->
   <div id="statTooltip" class="stat-tooltip hidden" role="tooltip">
-    <div class="st-title" id="stTitle"></div>
+    <div class="st-head">
+      <div class="st-title" id="stTitle"></div>
+      <button id="btnCloseStatTip" class="st-close mobile-only" type="button" aria-label="Close tooltip">&times;</button>
+    </div>
     <div class="st-row"><span class="st-key">What:</span><span id="stWhat"></span></div>
     <div class="st-row"><span class="st-key">How:</span><span id="stHow"></span></div>
     <div class="st-impact" id="stImpact"></div>

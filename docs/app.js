@@ -6,6 +6,8 @@
   const CFG = window.NOODLE_CONFIG || {};
   const API_BASE = (CFG.API_BASE_URL || "").replace(/\/$/, "");
 
+  const isMobile = () => window.innerWidth <= 768;
+
   const state = {
     backendOnline: false,
     standalone: null,
@@ -17,7 +19,12 @@
     showCars: true,
     showBuildings: true,
     drawerCollapsed: false,
+    mobileSnap: "peek", // "peek" | "half" | "full"
+    mobileTab: "controls", // "controls" | "impact"
+    wasMobile: isMobile(),
+    isTouchInspect: false,
     camera: { cx: 0, cy: 0, scale: 0.14 },
+    minScale: 0.012,
     dragging: false,
     lastMouse: { x: 0, y: 0 },
     hoverMouse: { x: -1, y: -1 },
@@ -29,9 +36,52 @@
   const $ = (id) => document.getElementById(id);
   const canvas = $("cityCanvas");
   const ctx = canvas.getContext("2d");
+  const workspaceEl = document.querySelector(".workspace");
+
+  function setMobileTab(tab) {
+    state.mobileTab = tab === "impact" ? "impact" : "controls";
+    const drawer = $("drawer");
+    drawer.dataset.mobileView = state.mobileTab;
+    $("tabMobileControls").classList.toggle("active", state.mobileTab === "controls");
+    $("tabMobileControls").setAttribute("aria-selected", String(state.mobileTab === "controls"));
+    $("tabMobileImpact").classList.toggle("active", state.mobileTab === "impact");
+    $("tabMobileImpact").setAttribute("aria-selected", String(state.mobileTab === "impact"));
+    const inner = drawer.querySelector(".drawer-inner");
+    if (inner) inner.scrollTop = 0;
+  }
+
+  function setMobileSnap(snap, skipReframe = false) {
+    const valid = snap === "full" || snap === "half" ? snap : "peek";
+    const prev = state.mobileSnap;
+    state.mobileSnap = valid;
+    state.drawerCollapsed = valid === "peek";
+    const drawer = $("drawer");
+    drawer.style.height = "";
+    drawer.style.transform = "";
+    drawer.dataset.snap = valid;
+    drawer.classList.toggle("collapsed", valid === "peek");
+    if (workspaceEl) {
+      workspaceEl.classList.toggle("sheet-half", valid === "half");
+      workspaceEl.classList.toggle("sheet-full", valid === "full");
+    }
+    const lbl = $("peekCtrlLabel");
+    if (lbl) lbl.textContent = valid === "peek" ? "Controls" : "Map";
+    if (valid === "peek") {
+      $("statTooltip").classList.add("hidden");
+    }
+    // Smoothly keep the map center framed in the open viewport above the bottom sheet
+    if (!skipReframe && isMobile() && state.map && prev !== valid) {
+      const vh = window.innerHeight || 700;
+      const occ = (s) => (s === "peek" ? 68 : vh * 0.52);
+      const deltaPx = (occ(valid) - occ(prev)) * 0.5;
+      if (Math.abs(deltaPx) > 1 && state.camera.scale > 0) {
+        state.camera.cy -= deltaPx / state.camera.scale;
+      }
+    }
+  }
 
   function resizeCanvas() {
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const rect = canvas.parentElement.getBoundingClientRect();
     canvas.width = Math.max(1, Math.floor(rect.width * dpr));
     canvas.height = Math.max(1, Math.floor(rect.height * dpr));
@@ -42,14 +92,32 @@
     if (!state.map) return;
     const [x0, y0, x1, y1] = state.map.bounds;
     const rect = canvas.parentElement.getBoundingClientRect();
+    const mapW = Math.max(1, x1 - x0);
+    const mapH = Math.max(1, y1 - y0);
+
+    if (isMobile()) {
+      const sheetOcc = state.mobileSnap === "half" ? rect.height * 0.52 : 80;
+      const topOcc = 44;
+      const availH = Math.max(180, rect.height - sheetOcc - topOcc);
+      const sx = (rect.width * 0.93) / mapW;
+      const sy = (availH * 0.90) / mapH;
+      state.camera.scale = Math.min(sx, sy);
+      state.minScale = Math.min(0.012, state.camera.scale * 0.65);
+      state.camera.cx = (x0 + x1) / 2;
+      // Shift center slightly so Iași sits centered in the open map area above the bottom sheet
+      const centerShiftPx = (sheetOcc - topOcc) * 0.5;
+      state.camera.cy = (y0 + y1) / 2 - centerShiftPx / state.camera.scale;
+      return;
+    }
+
     const drawerOffset = state.drawerCollapsed ? 0 : 340;
     const availW = Math.max(260, rect.width - drawerOffset);
-    state.camera.cx = (x0 + x1) / 2 + (drawerOffset / 2) / Math.max(0.05, state.camera.scale);
-    state.camera.cy = (y0 + y1) / 2;
-    const sx = (availW * 0.88) / Math.max(1, x1 - x0);
-    const sy = (rect.height * 0.88) / Math.max(1, y1 - y0);
+    const sx = (availW * 0.88) / mapW;
+    const sy = (rect.height * 0.88) / mapH;
     state.camera.scale = Math.min(sx, sy);
+    state.minScale = Math.min(0.018, state.camera.scale * 0.6);
     state.camera.cx = (x0 + x1) / 2 + (drawerOffset * 0.45) / state.camera.scale;
+    state.camera.cy = (y0 + y1) / 2;
   }
 
   function toScreen(wx, wy) {
@@ -70,7 +138,8 @@
 
   function zoomAt(sx, sy, factor) {
     const [wx, wy] = toWorld(sx, sy);
-    state.camera.scale = Math.max(0.03, Math.min(6.0, state.camera.scale * factor));
+    const minSc = state.minScale || 0.012;
+    state.camera.scale = Math.max(minSc, Math.min(6.0, state.camera.scale * factor));
     const rect = canvas.parentElement.getBoundingClientRect();
     state.camera.cx = wx - (sx - rect.width / 2) / state.camera.scale;
     state.camera.cy = wy + (sy - rect.height / 2) / state.camera.scale;
@@ -95,7 +164,7 @@
       return;
     }
     const eng = state.standalone;
-    if (!eng) return;
+    if (!eng || !state.map) return;
     if (payload.cmd === "set_mode") eng.setMode(payload.mode);
     else if (payload.cmd === "set_adaptive") eng.adaptive = !!payload.adaptive;
     else if (payload.cmd === "set_paused") eng.paused = !!payload.paused;
@@ -123,7 +192,10 @@
   async function refreshSlots() {
     const data = state.backendOnline ? await apiFetch("/api/slots") : state.standalone.listSlots();
     const active = data.slots.find((s) => s.name === data.active_slot) || { name: data.active_slot, episodes: 0 };
-    $("slotBtnLabel").textContent = `Slot: ${active.name} (${active.episodes} ep)`;
+    state.activeSlotMeta = active;
+    $("slotBtnLabel").textContent = isMobile()
+      ? active.name
+      : `Slot: ${active.name} (${active.episodes} ep)`;
     const list = $("slotList");
     list.innerHTML = "";
     data.slots.forEach((s) => {
@@ -167,9 +239,16 @@
     const carsTxt = k.cars_count != null ? ` · ${k.cars_count.toLocaleString()} Vehicles` : "";
     const clockTxt = f.day_cycle && f.day_time ? ` · ${f.day_time}` : "";
     const weatherTxt = f.weather && f.weather !== "clear" ? ` · ${f.weather === "rain" ? "Rain" : "Snow"}` : "";
-    $("mapClockText").textContent = isTerra
-      ? `Terra (Real) · ${k.total_buses} Live CTP Buses · Tranzy API`
-      : `Aether (Simulation) · t = ${f.t.toFixed(1)}s${clockTxt}${weatherTxt} · ${k.total_routes} Lines${carsTxt}`;
+    if (isMobile()) {
+      const mCars = k.cars_count != null ? ` · ${k.cars_count.toLocaleString()} veh` : "";
+      $("mapClockText").textContent = isTerra
+        ? `Terra · ${k.total_buses} Live Buses`
+        : `Aether · ${f.t.toFixed(0)}s${clockTxt}${weatherTxt}${mCars}`;
+    } else {
+      $("mapClockText").textContent = isTerra
+        ? `Terra (Real) · ${k.total_buses} Live CTP Buses · Tranzy API`
+        : `Aether (Simulation) · t = ${f.t.toFixed(1)}s${clockTxt}${weatherTxt} · ${k.total_routes} Lines${carsTxt}`;
+    }
 
     // Status pill
     const badge = $("statusBadge");
@@ -186,12 +265,32 @@
 
     // Hero KPI
     const redPct = k.bus_delay_reduction_pct;
-    $("kpiDelayReduction").textContent = isTerra
+    const delayStr = isTerra
       ? `-${Math.abs(redPct).toFixed(1)}%`
       : (f.adaptive ? `-${Math.max(0, redPct).toFixed(1)}%` : "0.0%");
+    $("kpiDelayReduction").textContent = delayStr;
 
     // Secondary KPIs (Strictly honest bus-inferred Predicted Flow!)
-    $("kpiPredictedFlow").textContent = `${Math.round(k.predicted_flow * 100)}%`;
+    const flowStr = `${Math.round(k.predicted_flow * 100)}%`;
+    $("kpiPredictedFlow").textContent = flowStr;
+
+    // Mobile bottom-sheet Peek Bar live summary
+    const peekDelay = $("peekDelay");
+    if (peekDelay) {
+      peekDelay.textContent = delayStr;
+      $("peekFlow").textContent = flowStr;
+      $("peekDot").classList.toggle("fixed", !isTerra && !f.adaptive);
+      const peekPauseBtn = $("btnPeekPause");
+      if (peekPauseBtn) {
+        peekPauseBtn.classList.toggle("hidden", isTerra);
+        const pIcon = $("peekPauseIcon");
+        if (pIcon) {
+          pIcon.innerHTML = f.paused
+            ? '<path d="M5.5 3.5l9 5.5-9 5.5v-11z" fill="currentColor"/>'
+            : '<rect x="4.5" y="3.5" width="3" height="11" rx="1" fill="currentColor"/><rect x="10.5" y="3.5" width="3" height="11" rx="1" fill="currentColor"/>';
+        }
+      }
+    }
     $("kpiPrecision").textContent = `${(k.ai_precision * 100).toFixed(1)}%`;
     $("kpiHoldsSub").textContent = `${k.decisive_holds} decisive holds`;
 
@@ -665,7 +764,8 @@
         const [sx, sy] = toScreen(x, y);
         if (sx < -25 || sx > W + 25 || sy < -25 || sy > H + 25) continue;
 
-        if (Math.hypot(sx - state.hoverMouse.x, sy - state.hoverMouse.y) < 14) {
+        const busHitR = state.isTouchInspect ? 24 : 14;
+        if (state.hoverMouse.x >= 0 && Math.hypot(sx - state.hoverMouse.x, sy - state.hoverMouse.y) < busHitR) {
           hoveredBus = b;
         }
 
@@ -705,7 +805,9 @@
         ctx.stroke();
         ctx.restore();
 
-        const cell = `${Math.floor(sx / 38)}:${Math.floor(sy / 22)}`;
+        const cellW = isMobile() ? (sc < 0.08 ? 58 : 44) : 38;
+        const cellH = isMobile() ? (sc < 0.08 ? 30 : 24) : 22;
+        const cell = `${Math.floor(sx / cellW)}:${Math.floor(sy / cellH)}`;
         if (line && !chipGrid.has(cell)) {
           chipGrid.add(cell);
           ctx.font = "700 10px Inter, sans-serif";
@@ -719,28 +821,36 @@
         }
       }
 
-      // Hover tooltip (bus -> roundabout -> building)
+      // Hover / tap tooltip (bus -> roundabout -> building), clamped inside viewport bounds
       const tip = $("mapTooltip");
+      let tipText = "";
       if (hoveredBus) {
         const [id, line, , , , , spdRatio, status, restMin, atStop = 0] = hoveredBus;
-        tip.classList.remove("hidden");
-        tip.style.left = `${state.hoverMouse.x + 14}px`;
-        tip.style.top = `${state.hoverMouse.y - 12}px`;
-        tip.textContent = status === "DRIVING"
+        tipText = status === "DRIVING"
           ? (atStop ? `Line ${line} (${id}) · Boarding Passengers at CTP Stop` : `Line ${line} (${id}) · Driving · ${Math.round(spdRatio * 50)} km/h`)
           : `Line ${line} (${id}) · ${status === "DRIVER_BREAK" ? "Driver Break" : "Terminus Layover"} (${restMin}m left)`;
       } else if (hoveredRoundabout) {
         const [, rname, , , , rlanes, isSig] = hoveredRoundabout;
-        tip.classList.remove("hidden");
-        tip.style.left = `${state.hoverMouse.x + 14}px`;
-        tip.style.top = `${state.hoverMouse.y - 12}px`;
-        tip.textContent = `${rname} · ${rlanes}-Lane ${isSig ? "Signalized Roundabout" : "Yield-to-Left (HG 130/2023)"}`;
+        tipText = `${rname} · ${rlanes}-Lane ${isSig ? "Signalized Roundabout" : "Yield-to-Left (HG 130/2023)"}`;
       } else if (hoveredBuilding) {
         const [bid, isApt, isCity] = hoveredBuilding;
+        tipText = `${isApt ? "Apartment Block" : "House"} #${bid} · ${isCity ? "Iași City Core" : "Metropolitan / Outer"}`;
+      }
+      if (tipText) {
+        tip.textContent = tipText;
         tip.classList.remove("hidden");
-        tip.style.left = `${state.hoverMouse.x + 14}px`;
-        tip.style.top = `${state.hoverMouse.y - 12}px`;
-        tip.textContent = `${isApt ? "Apartment Block" : "House"} #${bid} · ${isCity ? "Iași City Core" : "Metropolitan / Outer"}`;
+        const tw = tip.offsetWidth || 180;
+        const th = tip.offsetHeight || 30;
+        const pad = 10;
+        const maxBottom = isMobile() ? (H - 96) : (H - pad);
+        let lx = state.hoverMouse.x + 14;
+        if (lx + tw > W - pad) lx = Math.max(pad, state.hoverMouse.x - tw - 14);
+        if (lx + tw > W - pad) lx = Math.max(pad, W - tw - pad);
+        let ty = state.hoverMouse.y - th - 12;
+        if (ty < 50) ty = Math.min(maxBottom - th, state.hoverMouse.y + 18);
+        ty = Math.max(pad, Math.min(maxBottom - th, ty));
+        tip.style.left = `${Math.round(lx)}px`;
+        tip.style.top = `${Math.round(ty)}px`;
       } else {
         tip.classList.add("hidden");
       }
@@ -771,29 +881,69 @@
       }
     }
 
-    // 10. Landmarks (clean civic map labels)
-    ctx.font = "600 11.5px Inter, sans-serif";
+    // 10. Landmarks (clean civic map labels with overlap avoidance on compact viewports)
+    const mobileView = isMobile();
+    ctx.font = mobileView ? "600 10.5px Inter, sans-serif" : "600 11.5px Inter, sans-serif";
+    const placedLabels = [];
     for (const lm of state.map.landmarks) {
       const [sx, sy] = toScreen(lm.x, lm.y);
       if (sx < -60 || sx > W + 60 || sy < -30 || sy > H + 30) continue;
       const tw = ctx.measureText(lm.name).width;
-      ctx.fillStyle = "rgba(255, 255, 255, 0.88)";
+      const padX = mobileView ? 5 : 7;
+      const boxW = tw + padX * 2;
+      const boxH = mobileView ? 18 : 20;
+      const bx0 = sx - boxW / 2;
+      const by0 = sy - boxH / 2;
+      if (mobileView && sc < 0.14) {
+        const margin = 4;
+        const overlaps = placedLabels.some(
+          ([x0, y0, x1, y1]) => bx0 - margin < x1 && bx0 + boxW + margin > x0 && by0 - margin < y1 && by0 + boxH + margin > y0
+        );
+        if (overlaps) continue;
+        placedLabels.push([bx0, by0, bx0 + boxW, by0 + boxH]);
+      }
+      ctx.fillStyle = "rgba(255, 255, 255, 0.90)";
       ctx.beginPath();
-      ctx.roundRect(sx - tw / 2 - 7, sy - 10, tw + 14, 20, 6);
+      ctx.roundRect(bx0, by0, boxW, boxH, 6);
       ctx.fill();
-      ctx.strokeStyle = "rgba(20, 83, 45, 0.14)";
+      ctx.strokeStyle = "rgba(20, 83, 45, 0.16)";
       ctx.lineWidth = 1;
       ctx.stroke();
       ctx.fillStyle = "#0f2a1f";
-      ctx.fillText(lm.name, sx - tw / 2, sy + 4);
+      ctx.fillText(lm.name, sx - tw / 2, sy + 3.5);
     }
   }
 
   // ==================== EVENT BINDINGS ====================
   function bindEvents() {
-    window.addEventListener("resize", () => { resizeCanvas(); });
+    const onViewportResize = () => {
+      resizeCanvas();
+      const nowMobile = isMobile();
+      if (nowMobile !== state.wasMobile) {
+        state.wasMobile = nowMobile;
+        if (nowMobile) {
+          setMobileSnap("peek", true);
+        } else {
+          state.drawerCollapsed = false;
+          const drawer = $("drawer");
+          drawer.style.height = "";
+          drawer.style.transform = "";
+          drawer.classList.remove("collapsed", "dragging");
+          if (workspaceEl) workspaceEl.classList.remove("sheet-half", "sheet-full");
+        }
+        if (state.activeSlotMeta) {
+          $("slotBtnLabel").textContent = nowMobile
+            ? state.activeSlotMeta.name
+            : `Slot: ${state.activeSlotMeta.name} (${state.activeSlotMeta.episodes} ep)`;
+        }
+        if (state.frame) updateUI(state.frame);
+        fitMap();
+      }
+    };
+    window.addEventListener("resize", onViewportResize);
+    window.addEventListener("orientationchange", () => setTimeout(() => { resizeCanvas(); fitMap(); }, 180));
 
-    // Map Pan & Zoom
+    // Desktop Mouse Pan & Zoom
     canvas.addEventListener("wheel", (e) => {
       e.preventDefault();
       const rect = canvas.getBoundingClientRect();
@@ -801,11 +951,13 @@
     }, { passive: false });
 
     canvas.addEventListener("mousedown", (e) => {
+      state.isTouchInspect = false;
       state.dragging = true;
       state.lastMouse = { x: e.clientX, y: e.clientY };
     });
     window.addEventListener("mouseup", () => { state.dragging = false; });
     canvas.addEventListener("mousemove", (e) => {
+      state.isTouchInspect = false;
       const rect = canvas.getBoundingClientRect();
       state.hoverMouse = { x: e.clientX - rect.left, y: e.clientY - rect.top };
       if (!state.dragging) return;
@@ -816,6 +968,109 @@
       state.camera.cy += dy / state.camera.scale;
     });
     canvas.addEventListener("mouseleave", () => { state.hoverMouse = { x: -1, y: -1 }; });
+
+    // Mobile Multi-Touch Map Navigation (1-finger pan, 2-finger pinch-zoom + pan, double-tap zoom, tap inspect)
+    let tLast = null;
+    let tStart = null;
+    let tMoved = false;
+    let pinchDist = 0;
+    let pinchMid = null;
+    let lastTap = { time: 0, x: 0, y: 0 };
+
+    const touchDist = (a, b) => Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    const touchMid = (a, b, rect) => ({
+      x: (a.clientX + b.clientX) * 0.5 - rect.left,
+      y: (a.clientY + b.clientY) * 0.5 - rect.top,
+    });
+
+    canvas.addEventListener("touchstart", (e) => {
+      if (e.touches.length === 0) return;
+      e.preventDefault();
+      $("slotDropdown").classList.add("hidden");
+      $("statTooltip").classList.add("hidden");
+      const rect = canvas.getBoundingClientRect();
+      if (e.touches.length === 1) {
+        const t = e.touches[0];
+        tLast = { x: t.clientX, y: t.clientY };
+        tStart = { x: t.clientX, y: t.clientY, cx: t.clientX - rect.left, cy: t.clientY - rect.top };
+        tMoved = false;
+        pinchDist = 0;
+        pinchMid = null;
+      } else if (e.touches.length >= 2) {
+        tMoved = true;
+        state.hoverMouse = { x: -1, y: -1 };
+        pinchDist = touchDist(e.touches[0], e.touches[1]);
+        pinchMid = touchMid(e.touches[0], e.touches[1], rect);
+      }
+    }, { passive: false });
+
+    canvas.addEventListener("touchmove", (e) => {
+      if (e.touches.length === 0) return;
+      e.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      if (e.touches.length === 1 && tLast) {
+        const t = e.touches[0];
+        const dx = t.clientX - tLast.x;
+        const dy = t.clientY - tLast.y;
+        tLast = { x: t.clientX, y: t.clientY };
+        if (tStart && Math.hypot(t.clientX - tStart.x, t.clientY - tStart.y) > 7) {
+          tMoved = true;
+          state.hoverMouse = { x: -1, y: -1 };
+        }
+        state.camera.cx -= dx / state.camera.scale;
+        state.camera.cy += dy / state.camera.scale;
+      } else if (e.touches.length >= 2) {
+        const newDist = touchDist(e.touches[0], e.touches[1]);
+        const newMid = touchMid(e.touches[0], e.touches[1], rect);
+        if (pinchDist > 8 && pinchMid) {
+          state.camera.cx -= (newMid.x - pinchMid.x) / state.camera.scale;
+          state.camera.cy += (newMid.y - pinchMid.y) / state.camera.scale;
+          const factor = Math.max(0.75, Math.min(1.35, newDist / pinchDist));
+          zoomAt(newMid.x, newMid.y, factor);
+        }
+        pinchDist = newDist;
+        pinchMid = newMid;
+        tMoved = true;
+      }
+    }, { passive: false });
+
+    canvas.addEventListener("touchend", (e) => {
+      if (e.touches.length === 1) {
+        // Smooth handoff from 2-finger pinch to 1-finger pan without jumping
+        tLast = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+        pinchDist = 0;
+        pinchMid = null;
+        tMoved = true;
+        return;
+      }
+      if (e.touches.length === 0) {
+        if (!tMoved && tStart) {
+          const now = Date.now();
+          if (now - lastTap.time < 300 && Math.hypot(tStart.cx - lastTap.x, tStart.cy - lastTap.y) < 32) {
+            // Double-tap zooms cleanly into tapped location
+            zoomAt(tStart.cx, tStart.cy, 1.85);
+            state.hoverMouse = { x: -1, y: -1 };
+            lastTap.time = 0;
+          } else {
+            // Single-tap inspects nearest bus / roundabout / building (or clears tooltip on empty map)
+            state.isTouchInspect = true;
+            state.hoverMouse = { x: tStart.cx, y: tStart.cy };
+            lastTap = { time: now, x: tStart.cx, y: tStart.cy };
+          }
+        }
+        tLast = null;
+        tStart = null;
+        pinchDist = 0;
+        pinchMid = null;
+      }
+    });
+
+    canvas.addEventListener("touchcancel", () => {
+      tLast = null;
+      tStart = null;
+      pinchDist = 0;
+      pinchMid = null;
+    });
 
     $("btnZoomIn").onclick = () => { const r = canvas.getBoundingClientRect(); zoomAt(r.width / 2, r.height / 2, 1.28); };
     $("btnZoomOut").onclick = () => { const r = canvas.getBoundingClientRect(); zoomAt(r.width / 2, r.height / 2, 0.78); };
@@ -884,32 +1139,170 @@
     };
 
     const tipEl = $("statTooltip");
-    document.querySelectorAll(".tip-target").forEach((el) => {
-      el.addEventListener("mouseenter", () => {
-        const cfg = STAT_TIPS[el.dataset.tip];
-        if (!cfg) return;
-        $("stTitle").textContent = cfg.title;
-        $("stWhat").textContent = cfg.what;
-        $("stHow").textContent = cfg.how;
-        $("stImpact").textContent = cfg.impact;
-        tipEl.classList.remove("hidden");
+    const showStatTip = (el) => {
+      const cfg = STAT_TIPS[el.dataset.tip];
+      if (!cfg) return;
+      $("stTitle").textContent = cfg.title;
+      $("stWhat").textContent = cfg.what;
+      $("stHow").textContent = cfg.how;
+      $("stImpact").textContent = cfg.impact;
+      tipEl.classList.remove("hidden");
+      if (!isMobile()) {
         const r = el.getBoundingClientRect();
         const th = tipEl.offsetHeight || 130;
         const left = Math.max(12, r.left - 288);
         const top = Math.max(66, Math.min(window.innerHeight - th - 14, r.top + (r.height - th) / 2));
         tipEl.style.left = `${left}px`;
         tipEl.style.top = `${top}px`;
+      }
+    };
+
+    document.querySelectorAll(".tip-target").forEach((el) => {
+      el.addEventListener("mouseenter", () => {
+        if (!isMobile()) showStatTip(el);
       });
-      el.addEventListener("mouseleave", () => tipEl.classList.add("hidden"));
+      el.addEventListener("mouseleave", () => {
+        if (!isMobile()) tipEl.classList.add("hidden");
+      });
+      el.addEventListener("click", (e) => {
+        if (!isMobile()) return;
+        if (e.target.closest("input, select, button")) return;
+        e.stopPropagation();
+        if (!tipEl.classList.contains("hidden") && tipEl.dataset.activeKey === el.dataset.tip) {
+          tipEl.classList.add("hidden");
+          tipEl.dataset.activeKey = "";
+        } else {
+          tipEl.dataset.activeKey = el.dataset.tip;
+          showStatTip(el);
+        }
+      });
     });
 
-    // Collapsible Right Drawer
+    const btnCloseTip = $("btnCloseStatTip");
+    if (btnCloseTip) {
+      btnCloseTip.onclick = (e) => {
+        e.stopPropagation();
+        tipEl.classList.add("hidden");
+        tipEl.dataset.activeKey = "";
+      };
+    }
+
+    // Collapsible Right Drawer (Desktop) & Swipeable Bottom Sheet (Mobile)
     const toggleDrawer = () => {
+      if (isMobile()) {
+        setMobileSnap(state.mobileSnap === "peek" ? "half" : "peek");
+        return;
+      }
       state.drawerCollapsed = !state.drawerCollapsed;
       $("drawer").classList.toggle("collapsed", state.drawerCollapsed);
     };
     $("btnDrawerTab").onclick = toggleDrawer;
     $("btnToggleDrawer").onclick = toggleDrawer;
+
+    // Mobile Bottom Sheet Buttons & Section Tabs
+    $("btnPeekImpact").onclick = () => {
+      if (state.mobileSnap !== "peek" && state.mobileTab === "impact") {
+        setMobileSnap("peek");
+      } else {
+        setMobileTab("impact");
+        setMobileSnap("full");
+      }
+    };
+    $("btnPeekControls").onclick = () => {
+      if (state.mobileSnap === "peek") {
+        setMobileTab("controls");
+        setMobileSnap("half");
+      } else {
+        setMobileSnap("peek");
+      }
+    };
+    $("btnPeekPause").onclick = (e) => {
+      e.stopPropagation();
+      sendCmd({ cmd: "set_paused", paused: !(state.frame && state.frame.paused) });
+    };
+    $("tabMobileControls").onclick = () => {
+      setMobileTab("controls");
+      if (state.mobileSnap === "peek") setMobileSnap("half");
+    };
+    $("tabMobileImpact").onclick = () => {
+      setMobileTab("impact");
+      if (state.mobileSnap === "peek") setMobileSnap("full");
+    };
+
+    // Touch Swipe-to-Resize on Mobile Bottom Sheet Header (resizes height directly so scroll never bleeds)
+    const sheetHeader = $("sheetHeader");
+    const drawerEl = $("drawer");
+    let sheetDrag = null;
+
+    const snapHeights = () => {
+      const vh = window.innerHeight || 700;
+      const peekH = 68;
+      const halfH = Math.round(vh * 0.52);
+      const fullH = Math.min(Math.round(vh * 0.84), vh - 58);
+      return { peek: peekH, half: halfH, full: fullH };
+    };
+
+    sheetHeader.addEventListener("touchstart", (e) => {
+      if (!isMobile() || e.touches.length !== 1) return;
+      if (e.target.closest("button")) return;
+      const hs = snapHeights();
+      sheetDrag = {
+        startY: e.touches[0].clientY,
+        startH: drawerEl.offsetHeight || hs[state.mobileSnap] || hs.peek,
+        lastY: e.touches[0].clientY,
+        lastT: Date.now(),
+        vel: 0,
+        moved: false,
+      };
+    }, { passive: true });
+
+    sheetHeader.addEventListener("touchmove", (e) => {
+      if (!sheetDrag || e.touches.length !== 1) return;
+      const y = e.touches[0].clientY;
+      const dy = y - sheetDrag.startY;
+      if (Math.abs(dy) > 6) sheetDrag.moved = true;
+      if (!sheetDrag.moved) return;
+      e.preventDefault();
+      const now = Date.now();
+      const dt = Math.max(1, now - sheetDrag.lastT);
+      sheetDrag.vel = (y - sheetDrag.lastY) / dt;
+      sheetDrag.lastY = y;
+      sheetDrag.lastT = now;
+      const hs = snapHeights();
+      const nextH = Math.max(hs.peek, Math.min(hs.full, sheetDrag.startH - dy));
+      drawerEl.classList.add("dragging");
+      drawerEl.style.height = `${Math.round(nextH)}px`;
+    }, { passive: false });
+
+    const finishSheetDrag = () => {
+      if (!sheetDrag) return;
+      const drag = sheetDrag;
+      sheetDrag = null;
+      drawerEl.classList.remove("dragging");
+      if (!drag.moved) {
+        // Simple tap on drag handle cycles Peek -> Half -> Full -> Peek
+        const next = state.mobileSnap === "peek" ? "half" : (state.mobileSnap === "half" ? "full" : "peek");
+        setMobileSnap(next);
+        return;
+      }
+      const hs = snapHeights();
+      const curH = Math.max(hs.peek, Math.min(hs.full, drag.startH - (drag.lastY - drag.startY)));
+      if (drag.vel < -0.45) {
+        setMobileSnap(state.mobileSnap === "peek" ? "half" : "full");
+      } else if (drag.vel > 0.45) {
+        setMobileSnap(state.mobileSnap === "full" ? "half" : "peek");
+      } else {
+        const choices = [
+          ["full", Math.abs(curH - hs.full)],
+          ["half", Math.abs(curH - hs.half)],
+          ["peek", Math.abs(curH - hs.peek)],
+        ];
+        choices.sort((a, b) => a[1] - b[1]);
+        setMobileSnap(choices[0][0]);
+      }
+    };
+    sheetHeader.addEventListener("touchend", finishSheetDrag);
+    sheetHeader.addEventListener("touchcancel", finishSheetDrag);
 
     // Mode Switcher: Aether (Simulation) | Terra (Real)
     const switchMode = async (mode) => {
@@ -927,8 +1320,12 @@
       $("slotDropdown").classList.toggle("hidden");
     };
     document.addEventListener("click", (e) => {
-      if (!$("slotDropdown").contains(e.target) && e.target !== $("btnSlotMenu")) {
+      if (!$("slotDropdown").contains(e.target) && !$("btnSlotMenu").contains(e.target)) {
         $("slotDropdown").classList.add("hidden");
+      }
+      if (isMobile() && !$("statTooltip").contains(e.target) && !e.target.closest(".tip-target")) {
+        $("statTooltip").classList.add("hidden");
+        $("statTooltip").dataset.activeKey = "";
       }
     });
 
@@ -940,12 +1337,16 @@
       await refreshSlots();
     };
 
-    $("btnNewSlot").onclick = () => {
+    const openNewSlotModal = () => {
+      $("slotDropdown").classList.add("hidden");
       $("inputNewSlotName").value = "";
       $("newSlotError").classList.add("hidden");
       $("newSlotModal").classList.remove("hidden");
       $("inputNewSlotName").focus();
     };
+    $("btnNewSlot").onclick = openNewSlotModal;
+    const btnNewMobile = $("btnNewSlotMobile");
+    if (btnNewMobile) btnNewMobile.onclick = openNewSlotModal;
 
     $("btnConfirmNewSlot").onclick = async () => {
       const name = $("inputNewSlotName").value.trim();
@@ -1001,9 +1402,14 @@
         : (res.message || "Connect to Terra first to read live fleet counts.");
     };
 
-    // Close modals
+    // Close modals (buttons & backdrop tap)
     document.querySelectorAll("[data-close]").forEach((btn) => {
       btn.onclick = () => $(btn.dataset.close).classList.add("hidden");
+    });
+    document.querySelectorAll(".modal-backdrop").forEach((backdrop) => {
+      backdrop.addEventListener("click", (e) => {
+        if (e.target === backdrop) backdrop.classList.add("hidden");
+      });
     });
 
     // Aether Quick Controls
@@ -1031,6 +1437,10 @@
 
   // ==================== BOOTSTRAP (AUTO-DETECT FASTAPI vs GITHUB PAGES) ====================
   async function boot() {
+    if (isMobile()) {
+      setMobileTab("controls");
+      setMobileSnap("peek", true);
+    }
     resizeCanvas();
     bindEvents();
 
