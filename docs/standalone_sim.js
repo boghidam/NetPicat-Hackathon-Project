@@ -20,7 +20,7 @@
     "901": 3, "902": 2
   };
 
-  const SLOTS_KEY = "noodle_ml_slots_v3";
+  const SLOTS_KEY = "noodle_ml_slots_v4";
   const CREDS_KEY = "noodle_tranzy_creds_v1";
   const TRANZY_BASE = "https://api.tranzy.ai/v1/opendata";
   const COLD_IASI_TRUST = { BUS_HOLD: 0.45, LOCAL_EXTEND: 0.25 };
@@ -133,7 +133,7 @@
     }
 
     async init() {
-      const slotNames = ["default", "trained_100ep", "trained_25ep", "fresh_0ep"];
+      const slotNames = ["default", "apprentice", "trained"];
       const [core, routesDoc, buildingsDoc, realismDoc, ...loadedSlots] = await Promise.all([
         fetchFirstJson(["./data/iasi_core.json", "../data/iasi_core.json", "/data/iasi_core.json"]),
         fetchFirstJson(["./data/iasi_routes.json", "../data/iasi_routes.json", "/data/iasi_routes.json"]),
@@ -172,15 +172,15 @@
       if (!this.slots.default) {
         this.slots.default = {
           schema_version: 2,
-          metadata: { slot_name: "default", map: "iasi", episodes: 8, sim_seconds_trained: 27974.6 },
+          metadata: { slot_name: "default", map: "iasi", episodes: 0, sim_seconds_trained: 0.0 },
           policy: {
             map: "iasi",
-            episodes: 8,
-            default_trust: { BUS_HOLD: 1.0, LOCAL_EXTEND: 0.45 },
+            episodes: 0,
+            default_trust: { ...COLD_IASI_TRUST },
             phase_bonus: {},
             trust: {},
             count: {},
-            outcomes: { BUS_HOLD: { decisive: 1256, wasted: 0, missed: 266 }, LOCAL_EXTEND: { decisive: 34, wasted: 206, missed: 213 } },
+            outcomes: { BUS_HOLD: { decisive: 0, wasted: 0, missed: 0 }, LOCAL_EXTEND: { decisive: 0, wasted: 0, missed: 0 } },
           },
         };
         changed = true;

@@ -61,9 +61,13 @@ def test_named_slots_flexibility_and_isolation(tmp_path):
     assert reset_s1["metadata"]["episodes"] == 0
     assert mgr.load_slot("slot_1")["policy"]["trust"] == {}
 
-    # Default pre-trained Iasi slot keeps its saved phase_bonus table
-    default_slot = SlotManager().load_slot("default", map_name="iasi")
-    assert len(default_slot["policy"]["phase_bonus"]) == 82
+    # Committed Iași slots exist with expected progression (default=0 ep, apprentice=50 ep, trained=500 ep)
+    real_mgr = SlotManager()
+    assert real_mgr.load_slot("default", map_name="iasi")["metadata"]["episodes"] == 0
+    assert real_mgr.load_slot("apprentice", map_name="iasi")["metadata"]["episodes"] == 50
+    trained_slot = real_mgr.load_slot("trained", map_name="iasi")
+    assert trained_slot["metadata"]["episodes"] == 500
+    assert len(trained_slot["policy"]["trust"]) > 0
 
     still_s2 = mgr.load_slot("rush_hour_exp")
     assert still_s2["policy"]["trust"]["195"]["LOCAL_EXTEND"] == pytest.approx(0.62)
