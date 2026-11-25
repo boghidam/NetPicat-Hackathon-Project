@@ -210,6 +210,68 @@ class EngineState:
             [rb.node, rb.name, round(rb.x, 1), round(rb.y, 1), round(rb.radius_m, 1), rb.ring_lanes, 1 if rb.signalized else 0]
             for rb in net.roundabouts
         ]
+        junctions = []
+        for node in net.nodes:
+            if node.kind == "roundabout" or node.gate:
+                continue
+            raw_arms = net.physical_arm_count(node.id)
+            if not node.signalised and node.kind != "yield" and raw_arms < 3:
+                continue
+            arms = max(raw_arms, len(net.in_segs[node.id]))
+            jkind = "signalized" if node.signalised else ("yield" if node.kind == "yield" else "merge")
+            inc_ids = net.in_segs[node.id] + net.out_segs[node.id]
+            inc_segs = [net.segments[sid] for sid in inc_ids]
+            max_hw = max(
+                ((s.lanes if s.oneway else s.lanes * 2) * 3.5 + 2.0) * 0.5
+                for s in inc_segs
+            ) if inc_segs else 4.0
+            min_len = min(s.length for s in inc_segs) if inc_segs else 60.0
+            near_d = min(
+                (math.hypot(other.x - node.x, other.y - node.y) for other in net.nodes if other.id != node.id),
+                default=100.0,
+            )
+            rad_cap = min(min_len * 0.22, near_d * 0.42)
+            rad_m = max(3.6, min(11.5, max(5.5, max_hw + 1.5), rad_cap))
+            yield_bars = []
+            if jkind == "yield":
+                for sid in sorted(net.yield_minor_approaches.get(node.id, ())):
+                    seg = net.segments[sid]
+                    pos_y = max(0.0, seg.length - min(rad_m + 3.2, 0.38 * seg.length))
+                    mid_lane = (seg.lanes - 1) * 0.5
+                    yx, yy, ydx, ydy = net.position(sid, pos_y, lane=mid_lane)
+                    half = max(2.2, seg.lanes * 1.55)
+                    yield_bars.append([
+                        round(yx - ydy * half, 1),
+                        round(yy + ydx * half, 1),
+                        round(yx + ydy * half, 1),
+                        round(yy - ydx * half, 1),
+                        round(ydx, 2),
+                        round(ydy, 2),
+                    ])
+            junctions.append([
+                node.id,
+                net.junction_name(node.id),
+                round(node.x, 1),
+                round(node.y, 1),
+                jkind,
+                round(rad_m, 1),
+                yield_bars,
+                arms,
+            ])
+        rond_loops = [
+            [
+                rl.node,
+                rl.name,
+                round(rl.x, 1),
+                round(rl.y, 1),
+                round(rl.radius_m, 1),
+                rl.kind,
+                list(rl.lines),
+                round(net.nodes[rl.node].x, 1),
+                round(net.nodes[rl.node].y, 1),
+            ]
+            for rl in net.rond_loops
+        ]
         bus_stops = [
             [st.id, round(st.x, 1), round(st.y, 1), 1 if st.has_bay else 0, st.name]
             for st in net.bus_stops
@@ -250,6 +312,8 @@ class EngineState:
             "routes": routes,
             "buildings": [b.to_map_tuple() for b in net.buildings],
             "roundabouts": roundabouts,
+            "junctions": junctions,
+            "rond_loops": rond_loops,
             "bus_stops": bus_stops,
             "crosswalks": crosswalks,
             "rail_crossings": rail_crossings,

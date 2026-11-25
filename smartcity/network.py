@@ -184,6 +184,17 @@ class Hospital:
 
 
 @dataclass(frozen=True)
+class RondLoop:
+    node: int
+    name: str
+    x: float
+    y: float
+    radius_m: float
+    kind: str  # "tram_bus" | "bus"
+    lines: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class Segment:
     id: int
     from_node: int
@@ -283,6 +294,9 @@ class RoadNetwork:
         self.rail_crossings: list[RailCrossing] = []
         self.rail_by_seg: dict[int, RailCrossing] = {}
         self.hospitals: list[Hospital] = []
+        self.rond_loops: list[RondLoop] = []
+        self.rond_loop_by_node: dict[int, RondLoop] = {}
+        self.junction_names: dict[int, str] = {}
         self.coincident_twin: dict[int, int] = self._find_coincident_twins()
 
     def _find_coincident_twins(self, tol_m: float = 2.5) -> dict[int, int]:
@@ -381,17 +395,27 @@ class RoadNetwork:
             self.roundabouts.append(rb)
             self.roundabout_by_node[nid] = rb
 
-        # Identify minor yielding arm(s) at each unsignalized Cedează T-junction (the stem of the T yields!)
+        # Identify minor yielding arm(s) at each unsignalized Cedează junction (minor side-street / stem yields)
+        hwy_prio = {"primary": 4, "secondary": 3, "tertiary": 2, "unclassified": 1, "residential": 0, "service": -1}
         self.yield_minor_approaches = {}
         for nid in self.yield_nodes:
+            in_list = self.in_segs[nid]
             groups = self._pair_approaches(nid)
-            # Paired opposite streets form the main priority road; any unpaired stem yields!
+            # Paired opposite streets form the main priority road; any unpaired stem yields
             paired = {a for g in groups if len(g) >= 2 for a in g}
-            minor = set(self.in_segs[nid]) - paired
-            if not minor and len(self.in_segs[nid]) >= 2:
-                # Fallback: approach with lowest lane count / speed limit yields
-                worst = min(self.in_segs[nid], key=lambda s: (self.segments[s].lanes, self.segments[s].speed_limit))
-                minor = {worst}
+            minor = set(in_list) - paired
+            if len(in_list) >= 2 and (not minor or len(minor) == len(in_list)):
+                # E.g. 2-in non-opposite merge or equal hierarchy: highest-priority continuous street keeps right of way
+                def _main_score(sid: int) -> tuple[float, int, float, int]:
+                    s = self.segments[sid]
+                    h_raw = (s.highway or "").lower()
+                    h_base = h_raw.replace("_link", "")
+                    rank = float(hwy_prio.get(h_base, 1)) - (0.5 if h_raw.endswith("_link") else 0.0)
+                    cont = 1 if (s.name and any(self.segments[o].name == s.name for o in self.out_segs[nid])) else 0
+                    return (rank, s.lanes, s.speed_limit, cont)
+
+                best_main = max(in_list, key=_main_score)
+                minor = {s for s in in_list if s != best_main}
             self.yield_minor_approaches[nid] = minor
 
         # Real CTP bus stops
@@ -469,6 +493,80 @@ class RoadNetwork:
             if 0 <= nid < len(self.nodes):
                 nd = self.nodes[nid]
                 self.hospitals.append(Hospital(str(h.get("name", "Spital")), nid, nd.x, nd.y))
+
+        # Curated intersection names & CTP transit turnaround loops (rond_loops)
+        self.junction_names = {int(k): str(v) for k, v in (data.get("junction_names") or {}).items()}
+        self.rond_loops = []
+        self.rond_loop_by_node = {}
+        for rl in data.get("rond_loops") or []:
+            nid = int(rl["node"])
+            if 0 <= nid < len(self.nodes):
+                lx, ly = self.proj.to_xy(float(rl["lat"]), float(rl["lon"]))
+                obj = RondLoop(
+                    node=nid,
+                    name=str(rl.get("name", f"Rond n{nid}")),
+                    x=lx,
+                    y=ly,
+                    radius_m=float(rl.get("radius_m", 14.5)),
+                    kind=str(rl.get("kind", "bus")),
+                    lines=tuple(str(x) for x in (rl.get("lines") or [])),
+                )
+                self.rond_loops.append(obj)
+                self.rond_loop_by_node.setdefault(nid, obj)
+
+    def physical_arm_count(self, node_id: int) -> int:
+        """Cluster distinct incoming and outgoing street arm bearings within 25 degrees."""
+        dirs: list[float] = []
+        for sid in self.in_segs[node_id]:
+            pts = self.segments[sid].points
+            dirs.append(math.atan2(pts[-2][1] - pts[-1][1], pts[-2][0] - pts[-1][0]))
+        for sid in self.out_segs[node_id]:
+            pts = self.segments[sid].points
+            dirs.append(math.atan2(pts[1][1] - pts[0][1], pts[1][0] - pts[0][0]))
+        tol = math.radians(25.0)
+        clusters: list[list[float]] = []
+        for a in sorted(dirs):
+            for c in clusters:
+                if abs(wrap(a - c[0])) < tol:
+                    c.append(a)
+                    break
+            else:
+                clusters.append([a])
+        if len(clusters) >= 2 and abs(wrap(clusters[-1][0] - clusters[0][0])) < tol:
+            clusters[0].extend(clusters.pop())
+        return len(clusters)
+
+    def junction_name(self, node_id: int) -> str:
+        """Human-readable label for a non-roundabout junction."""
+        if node_id in self.junction_names:
+            return self.junction_names[node_id]
+        seen: list[str] = []
+        for sid in self.in_segs[node_id] + self.out_segs[node_id]:
+            nm = (self.segments[sid].name or "").strip()
+            if nm and nm not in seen:
+                seen.append(nm)
+        if len(seen) >= 2:
+            return f"{seen[0]} × {seen[1]}"
+        if len(seen) == 1:
+            return seen[0]
+        return f"Intersecție n{node_id}"
+
+    def nearest_rond_loop(self, node_id: int, max_dist_m: float = 280.0) -> RondLoop | None:
+        """Return the CTP transit turnaround loop anchoring `node_id`, or the nearest loop within `max_dist_m`."""
+        direct = self.rond_loop_by_node.get(node_id)
+        if direct is not None:
+            return direct
+        if not self.rond_loops or not (0 <= node_id < len(self.nodes)):
+            return None
+        nd = self.nodes[node_id]
+        best: RondLoop | None = None
+        best_d = max_dist_m
+        for rl in self.rond_loops:
+            d = math.hypot(rl.x - nd.x, rl.y - nd.y)
+            if d <= best_d:
+                best_d = d
+                best = rl
+        return best
 
     def is_city_xy(self, x: float, y: float) -> bool:
         """True if local coordinate `(x, y)` lies inside the urban core radius."""

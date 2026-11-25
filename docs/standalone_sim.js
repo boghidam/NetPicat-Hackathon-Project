@@ -55,6 +55,7 @@
       this.outerBldgPool = [];
       this.gates = [];
       this.citySegSet = new Set();
+      this.inEdges = [];
       this.outEdges = [];
       this.prevEdge = null;
       this.pathLenM = null;
@@ -67,6 +68,10 @@
       this.roundabouts = [];
       this.roundaboutByNode = new Map();
       this.yieldNodes = new Set();
+      this.yieldMinorApproaches = new Map();
+      this.junctionNames = {};
+      this.rondLoops = [];
+      this.rondLoopByNode = new Map();
       this.busStopsBySeg = new Map();
       this.crosswalks = [];
       this.activeCrosswalks = new Map();
@@ -173,6 +178,7 @@
         return { id: n.id, x, y, lat: n.lat, lon: n.lon, inCount: 0, outCount: 0 };
       });
       const N = this.nodes.length;
+      this.inEdges = Array.from({ length: N }, () => []);
       this.outEdges = Array.from({ length: N }, () => []);
 
       const nodeMap = new Map(this.nodes.map((n) => [n.id, n]));
@@ -195,13 +201,29 @@
         const rawLen = cum[cum.length - 1] || 1;
         const speed = Math.max(20, Math.min(70, e.maxspeed_kph || 50)) / 3.6;
         const stopPos = e.length - Math.min(14, 0.4 * e.length);
+        const span = Math.min(20, e.length / 2);
+        const headingAt = (sa, sb) => {
+          const interp = (s) => {
+            const target = Math.max(0, Math.min(rawLen, (s / (e.length || 1)) * rawLen));
+            let k = 0;
+            while (k < cum.length - 2 && cum[k + 1] < target) k++;
+            const sp = Math.max(1e-6, cum[k + 1] - cum[k]);
+            const f = Math.max(0, Math.min(1, (target - cum[k]) / sp));
+            return [pts[k][0] + (pts[k + 1][0] - pts[k][0]) * f, pts[k][1] + (pts[k + 1][1] - pts[k][1]) * f];
+          };
+          const [xa, ya] = interp(sa), [xb, yb] = interp(sb);
+          return Math.atan2(yb - ya, xb - xa);
+        };
         const seg = {
           id: e.id, u: e.u, v: e.v, length: e.length, rawLen, speed, stopPos,
           hwy: (e.highway || "tertiary").replace("_link", ""),
+          rawHwy: e.highway || "tertiary",
           name: e.name || "",
           pts, cum,
+          headingIn: headingAt(e.length - span, e.length),
         };
         this.outEdges[e.u].push(seg);
+        this.inEdges[e.v].push(seg);
         const uvKey = `${e.u}:${e.v}`;
         if (!byUV.has(uvKey)) byUV.set(uvKey, []);
         byUV.get(uvKey).push(seg);
@@ -282,11 +304,12 @@
 
       this._buildRoutingTables();
 
-      // Apply Iași realism metadata (multi-lane, roundabouts, yield T-junctions, 228 bus stops, crosswalks, rail, hospitals)
+      // Apply Iași realism metadata (multi-lane, roundabouts, yield junctions, rond loops, 222 bus stops, crosswalks, rail, hospitals)
       const edgeLanes = (realismDoc && realismDoc.edge_lanes) || {};
       const edgeGrades = (realismDoc && realismDoc.edge_grades) || {};
       const rbRaw = (realismDoc && realismDoc.roundabouts) || [];
       this.yieldNodes = new Set(((realismDoc && realismDoc.yield_nodes) || []).map(Number));
+      this.junctionNames = (realismDoc && realismDoc.junction_names) || {};
       const rbByNodeRaw = new Map(rbRaw.map((r) => [Number(r.node), r]));
 
       this.segs.forEach((s) => {
@@ -297,6 +320,7 @@
         if (rbi) s.stopPos = s.length - Math.min(Number(rbi.radius_m) + 4.5, 0.42 * s.length);
       });
 
+      const gateSet = new Set(this.gates);
       this.roundabouts = [];
       this.roundaboutByNode = new Map();
       const rbTuples = [];
@@ -305,6 +329,7 @@
         const nd = this.nodes[nid];
         if (!nd) continue;
         const rad = Number(r.radius_m);
+        const isSig = !!r.signalized && !gateSet.has(nid);
         const armAngles = new Map();
         for (const s of this.segs) {
           if (s.v === nid) {
@@ -322,11 +347,95 @@
         const obj = {
           node: nid, name: r.name, x: nd.x, y: nd.y,
           radius: rad, ringLanes: Number(r.ring_lanes || 1),
-          signalized: !!r.signalized, armAngles,
+          signalized: isSig, armAngles,
         };
         this.roundabouts.push(obj);
         this.roundaboutByNode.set(nid, obj);
-        rbTuples.push([nid, r.name, Math.round(nd.x * 10) / 10, Math.round(nd.y * 10) / 10, obj.radius, obj.ringLanes, obj.signalized ? 1 : 0]);
+        rbTuples.push([nid, r.name, Math.round(nd.x * 10) / 10, Math.round(nd.y * 10) / 10, obj.radius, obj.ringLanes, isSig ? 1 : 0]);
+      }
+
+      // Compute minor yielding arms at each unsignalized Cedează junction
+      const TWO_PI = Math.PI * 2;
+      const wrapAng = (a) => ((a + Math.PI) % TWO_PI + TWO_PI) % TWO_PI - Math.PI;
+      const oppTol = (40 * Math.PI) / 180;
+      const hwyPrio = { primary: 4, secondary: 3, tertiary: 2, unclassified: 1, residential: 0, service: -1 };
+      this.yieldMinorApproaches = new Map();
+      for (const nid of this.yieldNodes) {
+        if (this.roundaboutByNode.has(nid) || gateSet.has(nid)) continue;
+        const inList = this.inEdges[nid] || [];
+        const sortedIds = inList.map((s) => s.id).sort((a, b) => {
+          const ha = ((wrapAng(this.segs[a].headingIn) % TWO_PI) + TWO_PI) % TWO_PI;
+          const hb = ((wrapAng(this.segs[b].headingIn) % TWO_PI) + TWO_PI) % TWO_PI;
+          return ha - hb;
+        });
+        const pairs = [];
+        for (let i = 0; i < sortedIds.length; i++) {
+          for (let j = i + 1; j < sortedIds.length; j++) {
+            const sa = sortedIds[i], sb = sortedIds[j];
+            const off = Math.abs(Math.abs(wrapAng(this.segs[sa].headingIn - this.segs[sb].headingIn)) - Math.PI);
+            if (off < oppTol) pairs.push([off, sa, sb]);
+          }
+        }
+        pairs.sort((p1, p2) => p1[0] - p2[0]);
+        const paired = new Set();
+        for (const [, sa, sb] of pairs) {
+          if (!paired.has(sa) && !paired.has(sb)) { paired.add(sa); paired.add(sb); }
+        }
+        let minor = new Set(inList.map((s) => s.id).filter((sid) => !paired.has(sid)));
+        if (inList.length >= 2 && (minor.size === 0 || minor.size === inList.length)) {
+          const scoreSeg = (s) => {
+            const raw = (s.rawHwy || "").toLowerCase();
+            const base = raw.replace("_link", "");
+            const rank = (hwyPrio[base] ?? 1) - (raw.endsWith("_link") ? 0.5 : 0);
+            const cont = (s.name && (this.outEdges[nid] || []).some((o) => o.name === s.name)) ? 1 : 0;
+            return [rank, s.lanes || 1, s.speed, cont];
+          };
+          let bestMain = inList[0];
+          let bestSc = scoreSeg(bestMain);
+          for (let i = 1; i < inList.length; i++) {
+            const cand = scoreSeg(inList[i]);
+            let better = false;
+            for (let k = 0; k < cand.length; k++) {
+              if (cand[k] !== bestSc[k]) { better = cand[k] > bestSc[k]; break; }
+            }
+            if (better) { bestMain = inList[i]; bestSc = cand; }
+          }
+          minor = new Set(inList.map((s) => s.id).filter((sid) => sid !== bestMain.id));
+        }
+        this.yieldMinorApproaches.set(nid, minor);
+      }
+
+      // CTP Iași transit turnaround loops (rond_loops)
+      this.rondLoops = [];
+      this.rondLoopByNode = new Map();
+      const rondLoopTuples = [];
+      for (const rl of ((realismDoc && realismDoc.rond_loops) || [])) {
+        const nid = Number(rl.node);
+        const nd = this.nodes[nid];
+        if (!nd) continue;
+        const [lx, ly] = toXY(Number(rl.lat), Number(rl.lon));
+        const obj = {
+          node: nid,
+          name: String(rl.name || `Rond n${nid}`),
+          x: lx,
+          y: ly,
+          radius: Number(rl.radius_m || 14.5),
+          kind: String(rl.kind || "bus"),
+          lines: (rl.lines || []).map(String),
+        };
+        this.rondLoops.push(obj);
+        if (!this.rondLoopByNode.has(nid)) this.rondLoopByNode.set(nid, obj);
+        rondLoopTuples.push([
+          nid,
+          obj.name,
+          Math.round(lx * 10) / 10,
+          Math.round(ly * 10) / 10,
+          Math.round(obj.radius * 10) / 10,
+          obj.kind,
+          obj.lines,
+          Math.round(nd.x * 10) / 10,
+          Math.round(nd.y * 10) / 10,
+        ]);
       }
 
       this.busStopsBySeg = new Map();
@@ -368,7 +477,6 @@
       const roads = [];
       const segGeoms = {};
       const stopLines = {};
-      const gateSet = new Set(this.gates);
       this.segs.forEach((s) => {
         segGeoms[s.id] = s.pts.map(([x, y]) => [Math.round(x * 10) / 10, Math.round(y * 10) / 10]);
         const back = coincidentTwin.get(s.id);
@@ -378,7 +486,9 @@
           roads.push({ id: s.id, hwy: s.hwy, lanes: lanesDir, total_lanes: totalLanes, oneway: s.oneway, pts: segGeoms[s.id] });
         }
         const rbTarget = this.roundaboutByNode.get(s.v);
-        const isSigNode = rbTarget ? rbTarget.signalized : (nodeMap.get(s.v).inCount >= 3 && !gateSet.has(s.v) && !this.yieldNodes.has(s.v));
+        const isSigNode = rbTarget
+          ? (rbTarget.signalized && !gateSet.has(s.v))
+          : (nodeMap.get(s.v).inCount >= 3 && !gateSet.has(s.v) && !this.yieldNodes.has(s.v));
         if (isSigNode) {
           const [x, y, dx, dy] = this._posOnSeg(s, s.stopPos);
           const midLane = ((s.lanes || 1) - 1) * 0.5;
@@ -389,6 +499,65 @@
           this.signals.set(s.id, { phaseOffset: (s.v * 7 + (s.id % 2) * 25) % 50, state: "G" });
         }
       });
+
+      // Build non-roundabout junctions payload matching smartcity/web.py
+      const junctions = [];
+      for (const nd of this.nodes) {
+        if (this.roundaboutByNode.has(nd.id) || gateSet.has(nd.id)) continue;
+        const rawArms = this._physicalArmCount(nd.id);
+        const isYield = this.yieldNodes.has(nd.id);
+        const isSig = nd.inCount >= 3 && !isYield;
+        if (!isSig && !isYield && rawArms < 3) continue;
+        const arms = Math.max(rawArms, (this.inEdges[nd.id] || []).length);
+        const jkind = isSig ? "signalized" : (isYield ? "yield" : "merge");
+        const inc = [...(this.inEdges[nd.id] || []), ...(this.outEdges[nd.id] || [])];
+        let maxHw = 4.0, minLen = Infinity;
+        for (const s of inc) {
+          const totL = s.oneway ? (s.lanes || 1) : ((s.lanes || 1) * 2);
+          maxHw = Math.max(maxHw, (totL * 3.5 + 2.0) * 0.5);
+          if (s.length < minLen) minLen = s.length;
+        }
+        if (!Number.isFinite(minLen)) minLen = 60.0;
+        let nearD = Infinity;
+        for (const other of this.nodes) {
+          if (other.id === nd.id) continue;
+          const d = Math.hypot(other.x - nd.x, other.y - nd.y);
+          if (d < nearD) nearD = d;
+        }
+        const radCap = Math.min(minLen * 0.22, nearD * 0.42);
+        const radM = Math.max(3.6, Math.min(11.5, Math.max(5.5, maxHw + 1.5), radCap));
+        const yieldBars = [];
+        if (jkind === "yield") {
+          const minors = Array.from(this.yieldMinorApproaches.get(nd.id) || []).sort((a, b) => a - b);
+          for (const sid of minors) {
+            const s = this.segs[sid];
+            const posY = Math.max(0, s.length - Math.min(radM + 3.2, 0.38 * s.length));
+            const midLane = ((s.lanes || 1) - 1) * 0.5;
+            const off = this._laneOffset(s, midLane);
+            const [yx, yy, ydx, ydy] = this._posOnSeg(s, posY);
+            const px = yx + ydy * off, py = yy - ydx * off;
+            const half = Math.max(2.2, (s.lanes || 1) * 1.55);
+            yieldBars.push([
+              Math.round((px - ydy * half) * 10) / 10,
+              Math.round((py + ydx * half) * 10) / 10,
+              Math.round((px + ydy * half) * 10) / 10,
+              Math.round((py - ydx * half) * 10) / 10,
+              Math.round(ydx * 100) / 100,
+              Math.round(ydy * 100) / 100,
+            ]);
+          }
+        }
+        junctions.push([
+          nd.id,
+          this._junctionName(nd.id),
+          Math.round(nd.x * 10) / 10,
+          Math.round(nd.y * 10) / 10,
+          jkind,
+          Math.round(radM * 10) / 10,
+          yieldBars,
+          arms,
+        ]);
+      }
 
       this.routes = routesDoc.routes.map((r) => ({
         ref: r.ref,
@@ -421,12 +590,70 @@
         routes: this.routes,
         buildings: buildingTuples,
         roundabouts: rbTuples,
+        junctions,
+        rond_loops: rondLoopTuples,
         bus_stops: busStopTuples,
         crosswalks: cwTuples,
         rail_crossings: railTuples,
         key_points: landmarks.map((l) => l.name),
         signals_count: Object.keys(stopLines).length,
       };
+    }
+
+    _physicalArmCount(nid) {
+      const dirs = [];
+      for (const s of (this.inEdges[nid] || [])) {
+        const pts = s.pts;
+        if (pts.length >= 2) {
+          dirs.push(Math.atan2(pts[pts.length - 2][1] - pts[pts.length - 1][1], pts[pts.length - 2][0] - pts[pts.length - 1][0]));
+        }
+      }
+      for (const s of (this.outEdges[nid] || [])) {
+        const pts = s.pts;
+        if (pts.length >= 2) {
+          dirs.push(Math.atan2(pts[1][1] - pts[0][1], pts[1][0] - pts[0][0]));
+        }
+      }
+      dirs.sort((a, b) => a - b);
+      const tol = (25 * Math.PI) / 180;
+      const wrap = (a) => ((a + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
+      const clusters = [];
+      for (const a of dirs) {
+        let placed = false;
+        for (const c of clusters) {
+          if (Math.abs(wrap(a - c[0])) < tol) { c.push(a); placed = true; break; }
+        }
+        if (!placed) clusters.push([a]);
+      }
+      if (clusters.length >= 2 && Math.abs(wrap(clusters[clusters.length - 1][0] - clusters[0][0])) < tol) {
+        clusters[0].push(...clusters.pop());
+      }
+      return clusters.length;
+    }
+
+    _junctionName(nid) {
+      if (this.junctionNames && this.junctionNames[String(nid)]) return this.junctionNames[String(nid)];
+      const seen = [];
+      for (const s of [...(this.inEdges[nid] || []), ...(this.outEdges[nid] || [])]) {
+        const nm = (s.name || "").trim();
+        if (nm && !seen.includes(nm)) seen.push(nm);
+      }
+      if (seen.length >= 2) return `${seen[0]} × ${seen[1]}`;
+      if (seen.length === 1) return seen[0];
+      return `Intersecție n${nid}`;
+    }
+
+    _nearestRondLoop(nid, maxDistM = 280) {
+      const direct = this.rondLoopByNode.get(nid);
+      if (direct) return direct;
+      const nd = this.nodes[nid];
+      if (!nd || !this.rondLoops.length) return null;
+      let best = null, bestD = maxDistM;
+      for (const rl of this.rondLoops) {
+        const d = Math.hypot(rl.x - nd.x, rl.y - nd.y);
+        if (d <= bestD) { bestD = d; best = rl; }
+      }
+      return best;
     }
 
     _polylinesCoincide(ptsA, ptsB, tolM = 2.5) {
@@ -471,6 +698,18 @@
         }
       }
       const seg = this.segs[c.segId];
+      if (c.status && c.status !== "DRIVING" && seg) {
+        const loop = this._nearestRondLoop(seg.u);
+        if (loop) {
+          const rBay = Math.max(5.5, loop.radius - 1.4);
+          let idSum = 0;
+          const idStr = String(c.id || "");
+          for (let k = 0; k < idStr.length; k++) idSum += idStr.charCodeAt(k);
+          const slotAng = (idSum * 1.17) % (Math.PI * 2);
+          const ca = Math.cos(slotAng), sa = Math.sin(slotAng);
+          return [loop.x + rBay * ca, loop.y + rBay * sa, -sa, ca];
+        }
+      }
       let posDraw = Math.max(0, c.pos);
       const rbFrom = this.roundaboutByNode.get(seg.u);
       const rbTo = this.roundaboutByNode.get(seg.v);
@@ -895,6 +1134,23 @@
         sig.state = cycle < 22 ? "G" : cycle < 25 ? "Y" : "R";
       }
 
+      // Track priority approaches currently close to yield junctions (for realistic Cedează slowdown)
+      const yieldMainBusy = new Set();
+      for (let i = 0; i < this.cars.length; i++) {
+        const c = this.cars[i];
+        if (c.rbNode != null) continue;
+        const s = this.segs[c.segId];
+        const minors = this.yieldMinorApproaches.get(s.v);
+        if (minors && !minors.has(s.id) && s.length - c.pos <= 36) yieldMainBusy.add(s.v);
+      }
+      for (let i = 0; i < this.buses.length; i++) {
+        const b = this.buses[i];
+        if (b.status !== "DRIVING" || b.rbNode != null) continue;
+        const s = this.segs[b.route.edges[b.leg]];
+        const minors = this.yieldMinorApproaches.get(s.v);
+        if (minors && !minors.has(s.id) && s.length - b.pos <= 38) yieldMainBusy.add(s.v);
+      }
+
       // Move OD-routed multi-lane vehicles & circular Romanian roundabouts
       const segCounts = new Uint16Array(this.segs.length);
       const survivors = [];
@@ -921,7 +1177,16 @@
         const seg = this.segs[c.segId];
         const sig = this.signals.get(seg.id);
         const railClosed = this.activeRails.has(seg.id) && c.pos < seg.length * 0.5 && seg.length * 0.5 - c.pos < 14;
-        const blocked = (c.cls !== 3 && sig && sig.state === "R" && c.pos < seg.stopPos && seg.stopPos - c.pos < 18) || railClosed;
+        const minorsAtEnd = this.yieldMinorApproaches.get(seg.v);
+        const mustYield = c.cls !== 3 && minorsAtEnd && minorsAtEnd.has(seg.id) && yieldMainBusy.has(seg.v) && c.pos < seg.stopPos && seg.stopPos - c.pos < 14;
+        let yieldBlocked = false;
+        if (mustYield) {
+          c.yieldWait = (c.yieldWait || 0) + dt;
+          if (c.yieldWait < 3.5) yieldBlocked = true;
+        } else {
+          c.yieldWait = 0;
+        }
+        const blocked = (c.cls !== 3 && sig && sig.state === "R" && c.pos < seg.stopPos && seg.stopPos - c.pos < 18) || railClosed || yieldBlocked;
         const gradePen = seg.gradePct > 1.5 ? (c.cls === 2 ? 0.72 : 0.92) : 1.0;
         if (!blocked) c.pos += seg.speed * c.factor * wSpd * gradePen * dt * 0.78;
 

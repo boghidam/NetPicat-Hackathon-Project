@@ -22,20 +22,23 @@ def test_iasi_multi_lane_roundabouts_stops_and_grid_isolation() -> None:
     assert len(grid.roundabouts) == 0
     assert len(grid.bus_stops) == 0
 
-    # Iași has real mixed-traffic 1, 2, and 3-lane streets, 12 roundabouts, yield T-junctions, stops, crosswalks
+    # Iași has real mixed-traffic 1, 2, and 3-lane streets, 16 real car roundabouts, yield junctions, 14 CTP rond loops, stops, crosswalks
     assert sum(1 for s in iasi.segments if s.lanes == 2) >= 180
     assert sum(1 for s in iasi.segments if s.lanes == 3) >= 50
-    assert len(iasi.roundabouts) == 12
-    assert sum(1 for r in iasi.roundabouts if not r.signalized) == 10
-    assert sum(1 for r in iasi.roundabouts if r.signalized) == 2  # Podu Roș & Podu de Piatră
-    assert len(iasi.yield_nodes) >= 10
+    assert len(iasi.roundabouts) == 16
+    assert sum(1 for r in iasi.roundabouts if not r.signalized) == 13
+    assert sum(1 for r in iasi.roundabouts if r.signalized) == 3  # Podu Roș, Podu de Piatră & Fundație
+    rb_nodes = {r.node for r in iasi.roundabouts}
+    assert {80, 76, 83} <= rb_nodes  # Rond Zimbru, Rond Pasaj Octav Băncilă (ANL-uri), Rond Fundație
+    assert len(iasi.rond_loops) == 14
+    assert len(iasi.yield_nodes) >= 30
     assert len(iasi.bus_stops) >= 180
     assert len(iasi.crosswalks) >= 20
     assert len(iasi.hospitals) >= 4
     # Unsignalized roundabouts & yield junctions must NOT have traffic signals
     for rb in iasi.roundabouts:
         assert iasi.nodes[rb.node].kind == "roundabout"
-        assert iasi.nodes[rb.node].signalised is rb.signalized
+        assert iasi.nodes[rb.node].signalised is (rb.signalized and not iasi.nodes[rb.node].gate)
     for yn in iasi.yield_nodes:
         assert iasi.nodes[yn].kind == "yield"
         assert iasi.nodes[yn].signalised is False
@@ -184,7 +187,9 @@ def test_web_api_exposes_roundabouts_lanes_stops_and_realism_ws_commands() -> No
     app = create_app()
     with TestClient(app) as client:
         mp = client.get("/api/map").json()
-        assert len(mp["roundabouts"]) == 12
+        assert len(mp["roundabouts"]) == 16
+        assert len(mp["junctions"]) >= 120
+        assert len(mp["rond_loops"]) == 14
         assert len(mp["bus_stops"]) >= 180
         assert len(mp["crosswalks"]) >= 20
         assert any(r["lanes"] >= 2 for r in mp["roads"])

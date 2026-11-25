@@ -522,6 +522,14 @@ class TrafficModel:
             ca, sa = math.cos(v.rb_angle), math.sin(v.rb_angle)
             # Counterclockwise unit tangent is (-sin(a), cos(a))
             return rb.x + r_eff * ca, rb.y + r_eff * sa, -sa, ca
+        if v.kind == "bus" and v.status != "DRIVING":
+            seg = self.net.segments[v.seg]
+            loop = self.net.nearest_rond_loop(seg.from_node)
+            if loop is not None:
+                r_bay = max(5.5, loop.radius_m - 1.4)
+                slot_ang = (sum(ord(ch) for ch in v.id) * 1.17) % TWO_PI
+                ca, sa = math.cos(slot_ang), math.sin(slot_ang)
+                return loop.x + r_bay * ca, loop.y + r_bay * sa, -sa, ca
         seg = self.net.segments[v.seg]
         pos_draw = max(0.0, v.pos - v.length / 2) if v.status == "DRIVING" else 0.0
         # Keep vehicles outside the circular island of any connected roundabout (seamless rim entry/exit)

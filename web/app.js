@@ -437,7 +437,7 @@
       }
     }
 
-    // 1. Multi-Lane Road Casings (Bone/Sage outline), Snow White surfaces & Lane Dividers
+    // 1. Multi-Lane Road Casings (Bone/Sage outline), Snow White surfaces & Paved Junction Aprons
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
     const exag = 1.0 + 1.05 * Math.max(0, Math.min(1, (0.55 - sc) / 0.45));
@@ -461,6 +461,17 @@
         ctx.strokeStyle = pass === 0 ? "#bccdc2" : "#ffffff";
         ctx.lineWidth = pass === 0 ? w + 2.8 : w;
         ctx.stroke();
+      }
+      if (state.map.junctions && state.map.junctions.length) {
+        ctx.fillStyle = pass === 0 ? "#bccdc2" : "#ffffff";
+        for (const jn of state.map.junctions) {
+          const [sx, sy] = toScreen(jn[2], jn[3]);
+          if (sx < -45 || sx > W + 45 || sy < -45 || sy > H + 45) continue;
+          const apronR = Math.max(2.6, exag * jn[5] * sc);
+          ctx.beginPath();
+          ctx.arc(sx, sy, pass === 0 ? apronR + 1.4 : apronR, 0, Math.PI * 2);
+          ctx.fill();
+        }
       }
     }
 
@@ -509,18 +520,99 @@
       }
     }
 
+    // 1.3. Clean Junction Interior Pads, Signalized Decks & Romanian Cedează Yield Markings
+    let hoveredJunction = null;
+    if (state.map.junctions && state.map.junctions.length) {
+      const hitJ = state.hoverMouse.x >= 0;
+      for (const jn of state.map.junctions) {
+        const [, , jx, jy, jkind, radM, yieldBars] = jn;
+        const [sx, sy] = toScreen(jx, jy);
+        if (sx < -45 || sx > W + 45 || sy < -45 || sy > H + 45) continue;
+        const apronR = Math.max(2.6, exag * radM * sc);
+
+        if (hitJ && sc >= 0.14) {
+          const jHitR = state.isTouchInspect ? Math.max(16, apronR + 6) : Math.max(10, apronR + 4);
+          if (Math.hypot(sx - state.hoverMouse.x, sy - state.hoverMouse.y) <= jHitR) {
+            hoveredJunction = jn;
+          }
+        }
+
+        // Mask lane dividers inside junction interior so they stop cleanly at the apron threshold
+        if (sc >= 0.18) {
+          ctx.beginPath();
+          ctx.arc(sx, sy, Math.max(2.2, apronR * 0.92), 0, Math.PI * 2);
+          ctx.fillStyle = "#ffffff";
+          ctx.fill();
+        }
+
+        if (jkind === "signalized" && sc >= 0.22) {
+          ctx.beginPath();
+          ctx.arc(sx, sy, Math.max(2.4, apronR * 0.80), 0, Math.PI * 2);
+          ctx.fillStyle = "#f7fbf8";
+          ctx.fill();
+          ctx.strokeStyle = "rgba(20, 83, 45, 0.16)";
+          ctx.lineWidth = 0.9;
+          ctx.stroke();
+          if (sc >= 0.36 && apronR >= 4.5) {
+            const ch = Math.min(3.5, apronR * 0.30);
+            ctx.beginPath();
+            ctx.moveTo(sx - ch, sy); ctx.lineTo(sx + ch, sy);
+            ctx.moveTo(sx, sy - ch); ctx.lineTo(sx, sy + ch);
+            ctx.strokeStyle = "rgba(20, 83, 45, 0.18)";
+            ctx.lineWidth = 0.9;
+            ctx.stroke();
+          }
+        } else if (jkind === "yield" && sc >= 0.18) {
+          ctx.strokeStyle = "#b45309";
+          ctx.lineWidth = sc > 0.35 ? 2.2 : 1.5;
+          ctx.setLineDash([2.5, 2.2]);
+          for (const yb of yieldBars || []) {
+            const [ax, ay] = toScreen(yb[0], yb[1]);
+            const [bx, by] = toScreen(yb[2], yb[3]);
+            ctx.beginPath();
+            ctx.moveTo(ax, ay);
+            ctx.lineTo(bx, by);
+            ctx.stroke();
+          }
+          ctx.setLineDash([]);
+          if (sc >= 0.26) {
+            for (const yb of yieldBars || []) {
+              const mx = (yb[0] + yb[2]) * 0.5 - (yb[4] || 0) * 4.6;
+              const my = (yb[1] + yb[3]) * 0.5 - (yb[5] || 0) * 4.6;
+              const [tx, ty] = toScreen(mx, my);
+              ctx.save();
+              ctx.translate(tx, ty);
+              ctx.rotate(Math.atan2(-(yb[5] || 0), yb[4] || 1));
+              ctx.beginPath();
+              ctx.moveTo(3.8, 0);
+              ctx.lineTo(-3.0, -3.3);
+              ctx.lineTo(-3.0, 3.3);
+              ctx.closePath();
+              ctx.fillStyle = "#ffffff";
+              ctx.fill();
+              ctx.strokeStyle = "#dc2626";
+              ctx.lineWidth = 1.25;
+              ctx.stroke();
+              ctx.restore();
+            }
+          }
+        }
+      }
+    }
+
     // 1.5. Real Romanian Circular Roundabouts (Snow White ring + dashed HG 130/2023 lane + Forest Green island)
     let hoveredRoundabout = null;
     if (state.map.roundabouts && state.map.roundabouts.length) {
       for (const rb of state.map.roundabouts) {
-        const [nid, name, rx, ry, radM, ringLanes, isSig] = rb;
+        const [, , rx, ry, radM, ringLanes, isSig] = rb;
         const [sx, sy] = toScreen(rx, ry);
         if (sx < -60 || sx > W + 60 || sy < -60 || sy > H + 60) continue;
         const outerR = Math.max(7.5, (radM + 2.5) * sc);
         const ringW = Math.max(3.5, (ringLanes >= 2 ? 7.2 : 4.6) * sc);
         const islandR = Math.max(2.6, outerR - ringW);
+        const rbHitR = state.isTouchInspect ? outerR + 10 : outerR + 5;
 
-        if (state.hoverMouse.x >= 0 && Math.hypot(sx - state.hoverMouse.x, sy - state.hoverMouse.y) <= outerR + 5) {
+        if (state.hoverMouse.x >= 0 && Math.hypot(sx - state.hoverMouse.x, sy - state.hoverMouse.y) <= rbHitR) {
           hoveredRoundabout = rb;
         }
 
@@ -540,6 +632,59 @@
           ctx.setLineDash([4, 4]);
           ctx.strokeStyle = "rgba(100, 125, 110, 0.38)";
           ctx.lineWidth = 0.9;
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+      }
+    }
+
+    // 1.6. Real-World CTP Iași "Rond" Transit Turnaround Loops (spur connector + paved tram/bus bay ring)
+    let hoveredRondLoop = null;
+    if (state.map.rond_loops && state.map.rond_loops.length) {
+      for (const rl of state.map.rond_loops) {
+        const [, , lx, ly, radM, lkind, , nx, ny] = rl;
+        const [sx, sy] = toScreen(lx, ly);
+        if (sx < -60 || sx > W + 60 || sy < -60 || sy > H + 60) continue;
+        const outerR = Math.max(5.8, (radM + 1.8) * sc);
+        const ringW = Math.max(2.8, 4.4 * sc);
+        const islandR = Math.max(2.1, outerR - ringW);
+        const rlHitR = state.isTouchInspect ? outerR + 10 : outerR + 5;
+
+        if (state.hoverMouse.x >= 0 && Math.hypot(sx - state.hoverMouse.x, sy - state.hoverMouse.y) <= rlHitR) {
+          hoveredRondLoop = rl;
+        }
+
+        // Paved connector spur linking anchor node into the transit turnaround loop
+        const [nsx, nsy] = toScreen(nx, ny);
+        const distPx = Math.hypot(sx - nsx, sy - nsy);
+        if (distPx > 2.5) {
+          ctx.beginPath();
+          ctx.moveTo(nsx, nsy);
+          ctx.lineTo(sx, sy);
+          ctx.strokeStyle = "#9ecab1";
+          ctx.lineWidth = ringW + 2.4;
+          ctx.stroke();
+          ctx.strokeStyle = "#ffffff";
+          ctx.lineWidth = ringW;
+          ctx.stroke();
+        }
+
+        // Paved turnaround ring
+        ctx.beginPath();
+        ctx.arc(sx, sy, outerR, 0, Math.PI * 2);
+        ctx.fillStyle = "#ffffff";
+        ctx.fill();
+        ctx.strokeStyle = lkind === "tram_bus" ? "rgba(21, 128, 61, 0.56)" : "rgba(14, 116, 144, 0.52)";
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        // Inner tram track dashed guide inside tram+bus rond loops
+        if (lkind === "tram_bus" && sc >= 0.18) {
+          ctx.beginPath();
+          ctx.arc(sx, sy, islandR + ringW * 0.5, 0, Math.PI * 2);
+          ctx.setLineDash([2.8, 2.8]);
+          ctx.strokeStyle = "rgba(21, 128, 61, 0.52)";
+          ctx.lineWidth = 1.0;
           ctx.stroke();
           ctx.setLineDash([]);
         }
@@ -695,12 +840,11 @@
           const outerR = Math.max(7.5, (arc.rb.radM + 2.5) * sc);
           const ringW = Math.max(3.5, (arc.rb.ringLanes >= 2 ? 7.2 : 4.6) * sc);
           const rr = outerR - ringW * 0.5;
-          const diff = Math.abs(((arc.aOut - arc.aIn + Math.PI * 3) % (Math.PI * 2)) - Math.PI);
-          if (diff < 0.04) {
-            ctx.moveTo(rx + rr * Math.cos(-arc.aIn), ry + rr * Math.sin(-arc.aIn));
+          const ccwArc = (((arc.aOut - arc.aIn) % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+          ctx.moveTo(rx + rr * Math.cos(-arc.aIn), ry + rr * Math.sin(-arc.aIn));
+          if (ccwArc < 0.25 || ccwArc > Math.PI * 2 - 0.10) {
             ctx.arc(rx, ry, rr, -arc.aIn, -arc.aIn + Math.PI * 2, false);
           } else {
-            ctx.moveTo(rx + rr * Math.cos(-arc.aIn), ry + rr * Math.sin(-arc.aIn));
             ctx.arc(rx, ry, rr, -arc.aIn, -arc.aOut, true);
           }
         }
@@ -746,20 +890,62 @@
       }
     }
 
+    // 3.6. CTP Iași "Rond" Loop Center Islands
+    if (state.map.rond_loops && state.map.rond_loops.length) {
+      for (const rl of state.map.rond_loops) {
+        const [, , lx, ly, radM, lkind] = rl;
+        const [sx, sy] = toScreen(lx, ly);
+        if (sx < -60 || sx > W + 60 || sy < -60 || sy > H + 60) continue;
+        const outerR = Math.max(5.8, (radM + 1.8) * sc);
+        const ringW = Math.max(2.8, 4.4 * sc);
+        const islandR = Math.max(2.1, outerR - ringW);
+        ctx.beginPath();
+        ctx.arc(sx, sy, islandR, 0, Math.PI * 2);
+        ctx.fillStyle = lkind === "tram_bus" ? "#dcf5e4" : "#e0f2fe";
+        ctx.fill();
+        ctx.strokeStyle = lkind === "tram_bus" ? "rgba(21, 128, 61, 0.45)" : "rgba(14, 116, 144, 0.42)";
+        ctx.lineWidth = 1.1;
+        ctx.stroke();
+        if (sc >= 0.28 && islandR >= 5.2) {
+          ctx.font = `700 ${Math.min(10, Math.max(7, Math.round(islandR * 1.1)))}px Inter, sans-serif`;
+          ctx.fillStyle = lkind === "tram_bus" ? "#14532d" : "#0e7490";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText("R", sx, sy + 0.5);
+          ctx.textAlign = "start";
+          ctx.textBaseline = "alphabetic";
+        }
+      }
+    }
+
     if (f) {
 
-      // 4. Signal Stop Lines
+      // 4. Signal Stop Lines + Curb Signal Lamp Dots
       if (sc > 0.08 && f.signals) {
         const sigColor = { G: "#16a34a", Y: "#f59e0b", R: "#dc2626" };
-        ctx.lineWidth = sc > 0.35 ? 3.5 : 2.2;
+        const barW = sc > 0.35 ? 3.4 : 2.2;
         for (const [sid, st] of f.signals) {
           const sl = state.map.stop_lines[sid];
           if (!sl) continue;
           const [ax, ay] = toScreen(sl[0], sl[1]);
           if (ax < -20 || ax > W + 20 || ay < -20 || ay > H + 20) continue;
           const [bx, by] = toScreen(sl[2], sl[3]);
-          ctx.strokeStyle = sigColor[st] || "#16a34a";
+          const col = sigColor[st] || "#16a34a";
+          ctx.strokeStyle = "rgba(255, 255, 255, 0.88)";
+          ctx.lineWidth = barW + 2.0;
           ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+          ctx.strokeStyle = col;
+          ctx.lineWidth = barW;
+          ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+          if (sc >= 0.28) {
+            ctx.beginPath();
+            ctx.arc(bx, by, sc >= 0.45 ? 2.5 : 2.0, 0, Math.PI * 2);
+            ctx.fillStyle = col;
+            ctx.fill();
+            ctx.strokeStyle = "#0f2a1f";
+            ctx.lineWidth = 0.85;
+            ctx.stroke();
+          }
         }
       }
 
@@ -929,7 +1115,7 @@
         }
       }
 
-      // Hover / tap tooltip (bus -> roundabout -> building), clamped inside viewport bounds
+      // Hover / tap tooltip (bus -> roundabout -> rond loop -> junction -> building), clamped inside viewport bounds
       const tip = $("mapTooltip");
       let tipText = "";
       if (hoveredBus) {
@@ -940,6 +1126,15 @@
       } else if (hoveredRoundabout) {
         const [, rname, , , , rlanes, isSig] = hoveredRoundabout;
         tipText = `${rname} · ${rlanes}-Lane ${isSig ? "Signalized Roundabout" : "Yield-to-Left (HG 130/2023)"}`;
+      } else if (hoveredRondLoop) {
+        const [, lname, , , , lkind, llines] = hoveredRondLoop;
+        const lType = lkind === "tram_bus" ? "CTP Tram & Bus Loop" : "CTP Bus Loop";
+        const lList = llines && llines.length ? ` · Lines ${llines.slice(0, 6).join(", ")}${llines.length > 6 ? "…" : ""}` : "";
+        tipText = `${lname} · ${lType}${lList}`;
+      } else if (hoveredJunction) {
+        const [, jname, , , jkind, , , jarms] = hoveredJunction;
+        const jLabel = jkind === "signalized" ? "Signalized Junction" : (jkind === "yield" ? "Yield Junction (Cedează)" : "Road Junction");
+        tipText = `${jname} · ${jLabel}${jarms ? ` (${jarms} arms)` : ""}`;
       } else if (hoveredBuilding) {
         const [bid, isApt, isCity] = hoveredBuilding;
         tipText = `${isApt ? "Apartment Block" : "House"} #${bid} · ${isCity ? "Iași City Core" : "Metropolitan / Outer"}`;
