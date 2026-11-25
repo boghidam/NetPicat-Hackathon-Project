@@ -435,18 +435,36 @@ class EngineState:
             sim = self.sim
             m = sim.metrics()
             lrn = sim.coord.learner
-            dec = mis = wst = 0
+            dec = mis = wst = prior_judged = 0
             if lrn is not None:
                 for k in LEARNED_KINDS:
-                    dec += lrn.prior_outcomes[k]["decisive"] + lrn.outcomes[k]["decisive"]
-                    wst += lrn.prior_outcomes[k]["wasted"] + lrn.outcomes[k]["wasted"]
-                    mis += lrn.prior_outcomes[k]["missed"] + lrn.outcomes[k]["missed"]
+                    p_dec = lrn.prior_outcomes[k]["decisive"]
+                    p_wst = lrn.prior_outcomes[k]["wasted"]
+                    p_mis = lrn.prior_outcomes[k]["missed"]
+                    prior_judged += p_dec + p_wst + p_mis
+                    dec += p_dec + lrn.outcomes[k]["decisive"]
+                    wst += p_wst + lrn.outcomes[k]["wasted"]
+                    mis += p_mis + lrn.outcomes[k]["missed"]
             judged = dec + wst + mis
-            precision = (dec / judged) if judged > 0 else 0.964
+            precision = (dec / judged) if judged > 0 else 0.0
+            slot_ep = int(self.runtime.data.get("metadata", {}).get("episodes", 0))
+            is_cold = slot_ep == 0 and prior_judged == 0
+            learned_jcts = len(set(lrn.trusts) | set(lrn.phases)) if lrn is not None else 0
+            ml_stage = "cold" if (slot_ep == 0 and judged < 40) else ("learning" if slot_ep < 3 else "trained")
 
-            # Calibrated, smooth Bus Delay Reduced vs matched real Fixed-Timer baseline curve
+            # Calibrated, responsive Bus Delay Reduced vs matched real Fixed-Timer baseline curve
             baseline = fixed_baseline_delay(sim.t, sim.traffic_percent, rush_active=bool(sim.rush_point))
-            delay_ratio = m["bus_delay_ratio"] if sim.t >= 10.0 else (baseline * (1.0 - ADAPTIVE_WARMUP_REDUCTION) if sim.adaptive else baseline)
+            live_ratio = (
+                (0.35 * m["bus_delay_ratio"] + 0.65 * m["bus_delay_recent"])
+                if m["bus_delay_recent"] > 0.0
+                else m["bus_delay_ratio"]
+            )
+            warmup_prior = 0.0 if is_cold else ADAPTIVE_WARMUP_REDUCTION
+            delay_ratio = (
+                live_ratio
+                if sim.t >= 20.0
+                else (baseline * (1.0 - warmup_prior) if sim.adaptive else baseline)
+            )
             if not sim.adaptive:
                 delay_reduction = 0.0
                 self._smoothed_delay_red = 0.0
@@ -454,15 +472,14 @@ class EngineState:
                 self._was_adaptive = False
             else:
                 raw_red = max(0.0, (baseline - delay_ratio) / max(1e-6, baseline))
-                # Smoothly blend from measured Iași steady-state prior across the first signal cycle (t < 90 s)
-                w_live = min(1.0, max(0.0, (sim.t - 30.0) / 60.0))
-                target_red = (1.0 - w_live) * ADAPTIVE_WARMUP_REDUCTION + w_live * raw_red
+                w_live = min(1.0, max(0.0, (sim.t - 10.0) / 30.0)) if is_cold else min(1.0, max(0.0, (sim.t - 15.0) / 45.0))
+                target_red = (1.0 - w_live) * warmup_prior + w_live * raw_red
                 dt_kpi = max(0.0, sim.t - self._last_kpi_t)
-                if not self._was_adaptive or self._smoothed_delay_red <= 0.0:
+                if not self._was_adaptive or (not is_cold and self._smoothed_delay_red <= 0.0):
                     self._smoothed_delay_red = target_red
                     self._last_kpi_t = sim.t
                 elif dt_kpi > 0.0:
-                    alpha = 1.0 - math.exp(-dt_kpi / 35.0)
+                    alpha = 1.0 - math.exp(-dt_kpi / 25.0)
                     self._smoothed_delay_red += (target_red - self._smoothed_delay_red) * alpha
                     self._last_kpi_t = sim.t
                 self._was_adaptive = True
@@ -547,7 +564,7 @@ class EngineState:
                 "rush_point": sim.rush_point,
                 "rush_xy": rush_xy,
                 "active_slot": self.runtime.slot_name,
-                "slot_episodes": int(self.runtime.data.get("metadata", {}).get("episodes", 0)),
+                "slot_episodes": slot_ep,
                 "kpis": {
                     "bus_delay_ratio": round(delay_ratio, 4),
                     "baseline_delay_ratio": round(baseline, 4),
@@ -555,6 +572,9 @@ class EngineState:
                     "predicted_flow": round(m["predicted_flow"], 4),
                     "ai_precision": round(precision, 4),
                     "decisive_holds": dec,
+                    "ml_stage": ml_stage,
+                    "learned_junctions": learned_jcts,
+                    "session_decisions": lrn.judged if lrn is not None else 0,
                     "passenger_hours_saved_day": round(pax_hrs_day),
                     "passenger_hours_saved_per_rider": round(pax_hrs_per_rider, 3),
                     "passenger_mins_saved_per_rider": round(pax_hrs_per_rider * 60.0, 1),

@@ -214,7 +214,11 @@
       btn.onclick = async () => {
         $("slotDropdown").classList.add("hidden");
         if (state.backendOnline) await apiFetch("/api/slots/select", { method: "POST", body: JSON.stringify({ slot: s.name, clean: false }) });
-        else state.standalone.selectSlot(s.name, false);
+        else {
+          state.standalone.selectSlot(s.name, false);
+          state.frame = state.standalone.getFrame();
+          updateUI(state.frame);
+        }
         await refreshSlots();
       };
       list.appendChild(btn);
@@ -259,17 +263,25 @@
         : `Aether (Simulation) · t = ${f.t.toFixed(1)}s${clockTxt}${weatherTxt} · ${k.total_routes} Lines${carsTxt}`;
     }
 
-    // Status pill
+    // Status pill & live ML stage
     const badge = $("statusBadge");
     if (isTerra) {
       badge.className = "status-pill adaptive";
       $("statusBadgeText").textContent = f.terra_status.connected ? "TERRA LIVE" : "AWAITING API KEY";
     } else if (f.adaptive) {
       badge.className = "status-pill adaptive";
-      $("statusBadgeText").textContent = "ADAPTIVE AI ACTIVE";
+      $("statusBadgeText").textContent = k.ml_stage === "cold"
+        ? "LEARNING · COLD START"
+        : (k.ml_stage === "learning" ? "ADAPTIVE AI LEARNING" : "ADAPTIVE AI ACTIVE");
     } else {
       badge.className = "status-pill fixed";
       $("statusBadgeText").textContent = "FIXED TIMERS";
+    }
+
+    if (f.active_slot != null) {
+      const ep = Number(f.slot_episodes || 0);
+      $("slotBtnLabel").textContent = isMobile() ? f.active_slot : `Slot: ${f.active_slot} (${ep} ep)`;
+      state.activeSlotMeta = { name: f.active_slot, episodes: ep };
     }
 
     // Hero KPI
@@ -300,8 +312,9 @@
         }
       }
     }
-    $("kpiPrecision").textContent = `${(k.ai_precision * 100).toFixed(1)}%`;
-    $("kpiHoldsSub").textContent = `${k.decisive_holds} decisive holds`;
+    $("kpiPrecision").textContent = (k.decisive_holds > 0 || k.ai_precision > 0) ? `${(k.ai_precision * 100).toFixed(1)}%` : "—";
+    const jctSuffix = k.learned_junctions ? ` · ${k.learned_junctions} jct` : "";
+    $("kpiHoldsSub").textContent = `${Number(k.decisive_holds || 0).toLocaleString()} decisive holds${jctSuffix}`;
 
     // Municipal Value Bars
     $("barAdaptive").style.height = f.adaptive ? `${Math.min(95, Math.max(48, 60 + Math.abs(redPct) * 1.1))}%` : "54%";
@@ -1725,7 +1738,11 @@
       $("slotDropdown").classList.add("hidden");
       const active = (state.frame && state.frame.active_slot) || "default";
       if (state.backendOnline) await apiFetch("/api/slots/reset", { method: "POST", body: JSON.stringify({ slot: active }) });
-      else state.standalone.resetSlot(active);
+      else {
+        state.standalone.resetSlot(active);
+        state.frame = state.standalone.getFrame();
+        updateUI(state.frame);
+      }
       await refreshSlots();
     };
 
@@ -1744,7 +1761,11 @@
       const name = $("inputNewSlotName").value.trim();
       try {
         if (state.backendOnline) await apiFetch("/api/slots/select", { method: "POST", body: JSON.stringify({ slot: name, clean: true }) });
-        else state.standalone.selectSlot(name, true);
+        else {
+          state.standalone.selectSlot(name, true);
+          state.frame = state.standalone.getFrame();
+          updateUI(state.frame);
+        }
         $("newSlotModal").classList.add("hidden");
         await refreshSlots();
       } catch (err) {

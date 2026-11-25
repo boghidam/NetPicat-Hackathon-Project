@@ -296,6 +296,7 @@ class IntersectionController:
         self.extended_by = 0.0
         self._last_green = {self.idx: -self.elapsed}  # when each phase last turned green
         self._used_forecasts: set[int] = set()
+        self._green_buses: set[str] = set()
 
     # -- queries -----------------------------------------------------------
     @property
@@ -310,16 +311,23 @@ class IntersectionController:
 
     # -- simulation step ---------------------------------------------------
     def step(self, now: float, dt: float) -> None:
+        prev_elapsed = self.elapsed
         self.elapsed = round(self.elapsed + dt, 6)
         if self.phase == "YELLOW":
             if self.elapsed >= self.cfg.yellow:
                 self.phase, self.elapsed = "ALLRED", 0.0
                 if self.coord.learner is not None:  # the green and its yellow are over: judge what was decided
                     self.coord.learner.close(self, now)
+                    if self.coord.adaptive:
+                        openness = max((self.coord.downstream_openness(a) for a in self.current), default=1.0)
+                        self.coord.learner.observe_phase(self, len(self._green_buses), openness)
         elif self.phase == "ALLRED":
             if self.elapsed >= self.cfg.all_red:
                 self._start_green(now)
         elif self.phase == "GREEN":
+            if self.coord.adaptive and int(self.elapsed * 2.0) != int(prev_elapsed * 2.0):
+                for tel, _app, _dist in self.coord.loops.approaching(self.current, 120.0):
+                    self._green_buses.add(tel.bus_id)
             # Emergency ambulance green-wave preemption (only active when an ambulance approaches this junction)
             em = self.coord.emergency_approaches
             if em:
@@ -335,6 +343,7 @@ class IntersectionController:
     def _start_green(self, now: float) -> None:
         self.idx = (self.idx + 1) % len(self.groups)
         self.phase, self.elapsed, self.extended_by = "GREEN", 0.0, 0.0
+        self._green_buses.clear()
         self.planned = self.cfg.base_green  # the standard timer; never shorter
         previous = self._last_green.get(self.idx)
         self._last_green[self.idx] = now

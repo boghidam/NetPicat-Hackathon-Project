@@ -56,8 +56,14 @@ def test_named_slots_flexibility_and_isolation(tmp_path):
     # b) Reset slot_1 to clean defaults -> rush_hour_exp must remain completely untouched
     reset_s1 = mgr.reset_slot("slot_1", map_name="iasi")
     assert reset_s1["policy"]["trust"] == {}
+    assert reset_s1["policy"]["phase_bonus"] == {}
+    assert reset_s1["policy"]["default_trust"]["BUS_HOLD"] < 0.6
     assert reset_s1["metadata"]["episodes"] == 0
     assert mgr.load_slot("slot_1")["policy"]["trust"] == {}
+
+    # Default pre-trained Iasi slot keeps its saved phase_bonus table
+    default_slot = SlotManager().load_slot("default", map_name="iasi")
+    assert len(default_slot["policy"]["phase_bonus"]) == 82
 
     still_s2 = mgr.load_slot("rush_hour_exp")
     assert still_s2["policy"]["trust"]["195"]["LOCAL_EXTEND"] == pytest.approx(0.62)

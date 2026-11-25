@@ -51,11 +51,11 @@ def _json_safe(obj: Any) -> Any:
 
 
 def _default_policy_for_map(map_name: str) -> dict[str, Any]:
-    from .learning import DEFAULT_IASI_PHASES, DEFAULT_TRUST, LEARNED_KINDS
+    from .learning import COLD_IASI_TRUST, LEARNED_KINDS
 
     if map_name == "iasi":
-        default_trust = dict(DEFAULT_TRUST)
-        phase_bonus = {str(k): list(v) for k, v in sorted(DEFAULT_IASI_PHASES.items())}
+        default_trust = dict(COLD_IASI_TRUST)
+        phase_bonus: dict[str, list[float]] = {}
     else:
         default_trust = {k: 1.0 for k in LEARNED_KINDS}
         phase_bonus = {}

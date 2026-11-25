@@ -37,11 +37,17 @@ if TYPE_CHECKING:
 POLICY_PATH = Path(__file__).resolve().parent.parent / "data" / "learned_policy.json"
 
 LEARNED_KINDS = ("BUS_HOLD", "LOCAL_EXTEND")
-MIN_TRUST, MAX_TRUST = 0.40, 1.25
+MIN_TRUST, MAX_TRUST = 0.18, 1.45
 
 DEFAULT_TRUST: dict[str, float] = {
     "BUS_HOLD": 1.0,
     "LOCAL_EXTEND": 0.45,
+}
+
+# Cold-start defaults for brand-new / reset Iași slots so online RL improves visibly from scratch
+COLD_IASI_TRUST: dict[str, float] = {
+    "BUS_HOLD": 0.45,
+    "LOCAL_EXTEND": 0.25,
 }
 
 # Learned transit-corridor phase bonuses (seconds added when downstream is open) across all 51 CTP Iași lines.
@@ -219,6 +225,10 @@ class JunctionLearner:
             int(node): [float(x) for x in row]
             for node, row in (mem.get("phase_bonus") or {}).items()
         }
+        self.phase_demand: dict[int, list[float]] = {
+            node: [min(1.0, b / 14.0) for b in row]
+            for node, row in self.phases.items()
+        }
         self.trusts: dict[int, dict[str, float]] = {}
         self.counts: dict[int, int] = {}  # decisions judged per junction (this run and every earlier one)
         for node, row in (mem.get("trust") or {}).items():
@@ -285,11 +295,34 @@ class JunctionLearner:
             row = self.trusts.setdefault(ctl.node, {})
             base = self.default_trust.get(d.kind, 1.0)
             cur = row.get(d.kind, base)
-            # Stationary TD(0) update toward the empirical payoff target for this junction
-            target = max(MIN_TRUST, min(MAX_TRUST, base + 0.6 * reward))
-            step = cfg.learn_rate * (target - cur) if self.map_name == "iasi" else cfg.learn_rate * reward
+            if self.map_name == "iasi":
+                # Direct bounded RL step so Iași junctions keep adapting above cold-start defaults
+                step = cfg.learn_rate * (0.55 * reward if reward > 0.0 else 0.85 * reward)
+            else:
+                step = cfg.learn_rate * reward
             row[d.kind] = max(MIN_TRUST, min(MAX_TRUST, cur + step))
             self.counts[ctl.node] = self.counts.get(ctl.node, 0) + 1
+
+    def observe_phase(self, ctl: IntersectionController, bus_count: int, openness: float) -> None:
+        """Learn corridor phase green bonuses online from bus detections during each green phase."""
+        if self.map_name != "iasi" or len(ctl.groups) < 2:
+            return
+        n_phases = len(ctl.groups)
+        dem = self.phase_demand.get(ctl.node)
+        if dem is None or len(dem) != n_phases:
+            dem = [0.0] * n_phases
+            self.phase_demand[ctl.node] = dem
+        bon = self.phases.get(ctl.node)
+        if bon is None or len(bon) != n_phases:
+            bon = [0.0] * n_phases
+            self.phases[ctl.node] = bon
+        dem[ctl.idx] = 0.90 * dem[ctl.idx] + 0.10 * min(1.0, bus_count / 2.0)
+        min_d = min(dem)
+        rate = 0.12 * max(0.25, openness)
+        for i in range(n_phases):
+            excess = max(0.0, dem[i] - min_d - 0.04)
+            target = min(14.0, excess * 22.0)
+            bon[i] = max(0.0, min(14.0, bon[i] + rate * (target - bon[i])))
 
     @property
     def judged(self) -> int:
@@ -307,7 +340,11 @@ class JunctionLearner:
             "map": self.map_name,
             "episodes": self.episodes + (1 if self.judged > 0 else 0),
             "default_trust": dict(self.default_trust),
-            "phase_bonus": {str(n): [round(x, 2) for x in row] for n, row in sorted(self.phases.items())},
+            "phase_bonus": {
+                str(n): [round(x, 2) for x in row]
+                for n, row in sorted(self.phases.items())
+                if any(x >= 0.5 for x in row)
+            },
             "trust": {str(n): {k: round(v, 4) for k, v in row.items()} for n, row in sorted(self.trusts.items())},
             "count": {str(n): c for n, c in sorted(self.counts.items())},
             "outcomes": total_outcomes,
@@ -341,7 +378,17 @@ def merge_memories(memories: list[dict]) -> dict:
         merged["map"] = base["map"]
         merged["episodes"] = max(int(m.get("episodes", 0)) for m in unwrapped)
         merged["default_trust"] = dict(base.get("default_trust") or DEFAULT_TRUST)
-        merged["phase_bonus"] = dict(base.get("phase_bonus") or {})
+        phase_acc: dict[str, list[list[float]]] = {}
+        for mem in unwrapped:
+            for node, row in (mem.get("phase_bonus") or {}).items():
+                if isinstance(row, list) and row:
+                    phase_acc.setdefault(str(node), []).append([float(x) for x in row])
+        merged_phases: dict[str, list[float]] = {}
+        for node, rows in sorted(phase_acc.items(), key=lambda kv: int(kv[0])):
+            n_p = len(rows[0])
+            same = [r for r in rows if len(r) == n_p]
+            merged_phases[node] = [round(sum(r[i] for r in same) / len(same), 2) for i in range(n_p)]
+        merged["phase_bonus"] = merged_phases
         merged["outcomes"] = {
             kind: {
                 o: max(int(((m.get("outcomes") or {}).get(kind) or {}).get(o, 0)) for m in unwrapped)

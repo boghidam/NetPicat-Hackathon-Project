@@ -125,3 +125,23 @@ def test_compare_accepts_traffic_and_rush_options(capsys):
     out = capsys.readouterr().out
     assert "traffic 150%" in out and "rush hour at Podu Roș" in out
     assert "fixed" in out and "adaptive" in out
+
+
+def test_observe_phase_learns_corridor_bonus_from_cold_start():
+    from types import SimpleNamespace
+
+    learner = JunctionLearner(
+        Config(),
+        lambda *a, **k: 0.0,
+        lambda *a, **k: 0.0,
+        memory={"map": "iasi", "phase_bonus": {}},
+    )
+    ctl_p0 = SimpleNamespace(node=42, groups=[("a",), ("b",)], idx=0)
+    ctl_p1 = SimpleNamespace(node=42, groups=[("a",), ("b",)], idx=1)
+
+    for _ in range(10):
+        learner.observe_phase(ctl_p0, bus_count=2, openness=0.5)
+        learner.observe_phase(ctl_p1, bus_count=0, openness=0.5)
+
+    assert 42 in learner.phases
+    assert learner.phases[42][0] > learner.phases[42][1]

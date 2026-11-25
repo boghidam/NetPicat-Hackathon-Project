@@ -89,7 +89,8 @@ class Simulation:
         # metrics
         self._metrics_key: tuple | None = None
         self._metrics: dict[str, float] = {}
-        self.slow_ema = 0.0  # recent mean fraction of time buses lose to delay
+        self.slow_ema = 0.0  # recent mean fraction of time driving buses lose to delay
+        self._slow_ema_init = False
         self.peak_density = 0.0
         self.coord.refresh(0.0)
 
@@ -249,9 +250,15 @@ class Simulation:
         self.t = round(self.t + dt, 6)
         buses = self.fleet.buses
         if buses:
-            segs = self.net.segments
-            mean_slow = sum(1.0 - min(1.0, b.v / segs[b.seg].speed_limit) for b in buses) / len(buses)
-            self.slow_ema += (mean_slow - self.slow_ema) * dt / 60.0
+            driving = [b for b in buses if b.status == "DRIVING" and b.stop_dwell <= 0.0]
+            if driving:
+                segs = self.net.segments
+                mean_slow = sum(1.0 - min(1.0, b.v / segs[b.seg].speed_limit) for b in driving) / len(driving)
+                if not self._slow_ema_init:
+                    self.slow_ema = mean_slow
+                    self._slow_ema_init = True
+                else:
+                    self.slow_ema += (mean_slow - self.slow_ema) * min(1.0, dt / 30.0)
 
     def run(self, seconds: float) -> None:
         for _ in range(int(round(seconds / self.cfg.dt))):

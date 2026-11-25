@@ -20,9 +20,13 @@
     "901": 3, "902": 2
   };
 
-  const SLOTS_KEY = "noodle_ml_slots_v2";
+  const SLOTS_KEY = "noodle_ml_slots_v3";
   const CREDS_KEY = "noodle_tranzy_creds_v1";
   const TRANZY_BASE = "https://api.tranzy.ai/v1/opendata";
+  const COLD_IASI_TRUST = { BUS_HOLD: 0.45, LOCAL_EXTEND: 0.25 };
+  const MIN_TRUST = 0.18;
+  const MAX_TRUST = 1.45;
+  const LEARN_RATE = 0.08;
 
   async function fetchFirstJson(paths) {
     for (const p of paths) {
@@ -85,9 +89,27 @@
       this.urbanFriction = false;
       this.activeByKind = { city_to_building: 0, outer_to_building: 0, through_city: 0 };
       this.signals = new Map();
+      this.controllers = new Map();
+      this.ctlBySeg = new Map();
+      this.signalSegIds = [];
       this.rings = [];
       this.slots = {};
       this.activeSlot = "default";
+      this.policy = null;
+      this.priorOutcomes = { BUS_HOLD: { decisive: 0, wasted: 0, missed: 0 }, LOCAL_EXTEND: { decisive: 0, wasted: 0, missed: 0 } };
+      this.sessionOutcomes = { BUS_HOLD: { decisive: 0, wasted: 0, missed: 0 }, LOCAL_EXTEND: { decisive: 0, wasted: 0, missed: 0 } };
+      this.phaseDemand = new Map();
+      this.sessionJudged = 0;
+      this._slotStartT = 0;
+      this._episodeSimT = 0;
+      this._checkpointSimT = 0;
+      this._checkpointJudged = 0;
+      this.busDelayEma = 0;
+      this._delayEmaInit = false;
+      this.busDelaySum = 0;
+      this.busElapsedSum = 0;
+      this._smoothedDelayRed = null;
+      this._wasAdaptive = true;
       this.baseLineCounts = { ...LINE_BUSES };
 
       // Terra live state
@@ -135,12 +157,122 @@
       if (!this.slots.default) {
         this.slots.default = defaultSlot || {
           schema_version: 2,
-          metadata: { slot_name: "default", map: "iasi", episodes: 15, sim_seconds_trained: 2400 },
-          policy: { outcomes: { BUS_HOLD: { decisive: 438, wasted: 20, missed: 5 }, LOCAL_EXTEND: { decisive: 6, wasted: 18, missed: 6 } } },
+          metadata: { slot_name: "default", map: "iasi", episodes: 8, sim_seconds_trained: 27974.6 },
+          policy: {
+            map: "iasi",
+            episodes: 8,
+            default_trust: { BUS_HOLD: 1.0, LOCAL_EXTEND: 0.45 },
+            phase_bonus: {},
+            trust: {},
+            count: {},
+            outcomes: { BUS_HOLD: { decisive: 1256, wasted: 0, missed: 266 }, LOCAL_EXTEND: { decisive: 34, wasted: 206, missed: 213 } },
+          },
         };
         this._saveSlots();
       }
       this.activeSlot = "default";
+      this._hydrateSlotPolicy();
+    }
+
+    _hydrateSlotPolicy() {
+      const slot = this.slots[this.activeSlot] || this.slots.default || {};
+      const rawPol = slot.policy || {};
+      const cloneOut = (src) => ({
+        BUS_HOLD: {
+          decisive: Number((src && src.BUS_HOLD && src.BUS_HOLD.decisive) || 0),
+          wasted: Number((src && src.BUS_HOLD && src.BUS_HOLD.wasted) || 0),
+          missed: Number((src && src.BUS_HOLD && src.BUS_HOLD.missed) || 0),
+        },
+        LOCAL_EXTEND: {
+          decisive: Number((src && src.LOCAL_EXTEND && src.LOCAL_EXTEND.decisive) || 0),
+          wasted: Number((src && src.LOCAL_EXTEND && src.LOCAL_EXTEND.wasted) || 0),
+          missed: Number((src && src.LOCAL_EXTEND && src.LOCAL_EXTEND.missed) || 0),
+        },
+      });
+      const defTrust = rawPol.default_trust || COLD_IASI_TRUST;
+      const phases = {};
+      for (const [k, row] of Object.entries(rawPol.phase_bonus || {})) {
+        if (Array.isArray(row)) phases[String(k)] = row.map(Number);
+      }
+      const trust = {};
+      for (const [k, row] of Object.entries(rawPol.trust || {})) {
+        if (row && typeof row === "object") trust[String(k)] = { ...row };
+      }
+      const count = {};
+      for (const [k, v] of Object.entries(rawPol.count || {})) {
+        count[String(k)] = Number(v || 0);
+      }
+      this.policy = {
+        map: "iasi",
+        episodes: Number((slot.metadata && slot.metadata.episodes) || rawPol.episodes || 0),
+        default_trust: { BUS_HOLD: Number(defTrust.BUS_HOLD ?? 0.45), LOCAL_EXTEND: Number(defTrust.LOCAL_EXTEND ?? 0.25) },
+        phase_bonus: phases,
+        trust,
+        count,
+      };
+      this.priorOutcomes = cloneOut(rawPol.outcomes);
+      this.sessionOutcomes = cloneOut(null);
+      this.phaseDemand = new Map();
+      for (const [k, row] of Object.entries(phases)) {
+        this.phaseDemand.set(Number(k), row.map((b) => Math.min(1, b / 14)));
+      }
+      this.sessionJudged = 0;
+      this._slotStartT = this.t;
+      this._episodeSimT = this.t;
+      this._checkpointSimT = this.t;
+      this._checkpointJudged = 0;
+      this.busDelayEma = 0;
+      this._delayEmaInit = false;
+      this.busDelaySum = 0;
+      this.busElapsedSum = 0;
+      this._smoothedDelayRed = null;
+      for (const ctl of this.controllers.values()) {
+        ctl.openDecisions = [];
+        ctl.busesSeen.clear();
+      }
+    }
+
+    _persistActiveSlot(incrementEp = false) {
+      const slot = this.slots[this.activeSlot];
+      if (!slot || !this.policy) return;
+      const dtSim = Math.max(0, this.t - this._checkpointSimT);
+      const newJudged = this.sessionJudged - this._checkpointJudged;
+      if (dtSim <= 0 && newJudged <= 0 && !incrementEp) return;
+      const mergedOutcomes = {
+        BUS_HOLD: {
+          decisive: this.priorOutcomes.BUS_HOLD.decisive + this.sessionOutcomes.BUS_HOLD.decisive,
+          wasted: this.priorOutcomes.BUS_HOLD.wasted + this.sessionOutcomes.BUS_HOLD.wasted,
+          missed: this.priorOutcomes.BUS_HOLD.missed + this.sessionOutcomes.BUS_HOLD.missed,
+        },
+        LOCAL_EXTEND: {
+          decisive: this.priorOutcomes.LOCAL_EXTEND.decisive + this.sessionOutcomes.LOCAL_EXTEND.decisive,
+          wasted: this.priorOutcomes.LOCAL_EXTEND.wasted + this.sessionOutcomes.LOCAL_EXTEND.wasted,
+          missed: this.priorOutcomes.LOCAL_EXTEND.missed + this.sessionOutcomes.LOCAL_EXTEND.missed,
+        },
+      };
+      const savedPhases = {};
+      for (const [k, row] of Object.entries(this.policy.phase_bonus)) {
+        if (row.some((x) => x >= 0.5)) savedPhases[k] = row.map((x) => Math.round(x * 100) / 100);
+      }
+      slot.metadata = slot.metadata || { slot_name: this.activeSlot, map: "iasi", episodes: 0, sim_seconds_trained: 0 };
+      slot.metadata.sim_seconds_trained = Math.round(((slot.metadata.sim_seconds_trained || 0) + dtSim) * 10) / 10;
+      if (incrementEp && (newJudged > 0 || (this.t - this._episodeSimT) >= 120)) {
+        slot.metadata.episodes = (slot.metadata.episodes || 0) + 1;
+        this._episodeSimT = this.t;
+      }
+      slot.policy = {
+        map: "iasi",
+        episodes: slot.metadata.episodes || 0,
+        default_trust: { ...this.policy.default_trust },
+        phase_bonus: savedPhases,
+        trust: this.policy.trust,
+        count: this.policy.count,
+        outcomes: mergedOutcomes,
+      };
+      this.policy.episodes = slot.metadata.episodes || 0;
+      this._checkpointSimT = this.t;
+      this._checkpointJudged = this.sessionJudged;
+      this._saveSlots();
     }
 
     _saveSlots() {
@@ -477,6 +609,8 @@
       const roads = [];
       const segGeoms = {};
       const stopLines = {};
+      this.signalSegIds = [];
+      const sigNodes = new Set();
       this.segs.forEach((s) => {
         segGeoms[s.id] = s.pts.map(([x, y]) => [Math.round(x * 10) / 10, Math.round(y * 10) / 10]);
         const back = coincidentTwin.get(s.id);
@@ -496,9 +630,62 @@
           const sx = x + dy * off, sy = y - dx * off;
           const half = Math.max(2.2, (s.lanes || 1) * 1.55);
           stopLines[s.id] = [sx - dy * half, sy + dx * half, sx + dy * half, sy - dx * half];
-          this.signals.set(s.id, { phaseOffset: (s.v * 7 + (s.id % 2) * 25) % 50, state: "G" });
+          this.signalSegIds.push(s.id);
+          sigNodes.add(s.v);
         }
       });
+
+      // Build real per-junction phase state-machine controllers (matching smartcity/controller.py)
+      this.controllers = new Map();
+      this.ctlBySeg = new Map();
+      for (const nid of sigNodes) {
+        const inList = (this.inEdges[nid] || []).map((s) => s.id).sort((a, b) => {
+          const ha = ((wrapAng(this.segs[a].headingIn) % TWO_PI) + TWO_PI) % TWO_PI;
+          const hb = ((wrapAng(this.segs[b].headingIn) % TWO_PI) + TWO_PI) % TWO_PI;
+          return ha - hb;
+        });
+        if (!inList.length) continue;
+        const pairs = [];
+        for (let i = 0; i < inList.length; i++) {
+          for (let j = i + 1; j < inList.length; j++) {
+            const sa = inList[i], sb = inList[j];
+            const off = Math.abs(Math.abs(wrapAng(this.segs[sa].headingIn - this.segs[sb].headingIn)) - Math.PI);
+            if (off < oppTol) pairs.push([off, sa, sb]);
+          }
+        }
+        pairs.sort((p1, p2) => p1[0] - p2[0]);
+        const paired = new Set();
+        const groups = [];
+        for (const [, sa, sb] of pairs) {
+          if (!paired.has(sa) && !paired.has(sb)) {
+            paired.add(sa);
+            paired.add(sb);
+            groups.push([sa, sb]);
+          }
+        }
+        for (const sid of inList) {
+          if (!paired.has(sid)) groups.push([sid]);
+        }
+        groups.sort((g1, g2) => inList.indexOf(g1[0]) - inList.indexOf(g2[0]));
+        const groupOf = new Map();
+        groups.forEach((g, gi) => g.forEach((sid) => groupOf.set(sid, gi)));
+        const idx = nid % groups.length;
+        const ctl = {
+          node: nid,
+          groups,
+          groupOf,
+          idx,
+          phase: "GREEN",
+          elapsed: (nid * 7) % 20,
+          planned: 20,
+          extendedBy: 0,
+          holdFired: false,
+          openDecisions: [],
+          busesSeen: new Set(),
+        };
+        this.controllers.set(nid, ctl);
+        inList.forEach((sid) => this.ctlBySeg.set(sid, ctl));
+      }
 
       // Build non-roundabout junctions payload matching smartcity/web.py
       const junctions = [];
@@ -946,6 +1133,215 @@
       return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, dx, dy];
     }
 
+    _trust(node, kind) {
+      if (!this.policy) return kind === "BUS_HOLD" ? 0.45 : 0.25;
+      const row = this.policy.trust[String(node)];
+      if (row && row[kind] != null) return row[kind];
+      return this.policy.default_trust[kind] ?? 0.45;
+    }
+
+    _phaseBonus(node, phaseIdx) {
+      if (!this.policy) return 0;
+      const row = this.policy.phase_bonus[String(node)];
+      if (!row || phaseIdx >= row.length) return 0;
+      return row[phaseIdx] || 0;
+    }
+
+    _signalState(segId) {
+      const ctl = this.ctlBySeg.get(segId);
+      if (!ctl) return "G";
+      if (ctl.groupOf.get(segId) !== ctl.idx) return "R";
+      return ctl.phase === "GREEN" ? "G" : (ctl.phase === "YELLOW" ? "Y" : "R");
+    }
+
+    _judgeAndLearn(ctl) {
+      if (!this.policy) return;
+      const busById = new Map();
+      for (const b of this.buses) busById.set(b.id, b);
+      const redWait = Math.max(1, Math.max(1, ctl.groups.length - 1) * 25);
+      const nk = String(ctl.node);
+
+      for (const d of ctl.openDecisions) {
+        const b = busById.get(d.busId);
+        let outcome = "missed";
+        if (b) {
+          const cross = b.lastCrossed && b.lastCrossed.segId === d.segId && b.lastCrossed.leg === d.leg ? b.lastCrossed : null;
+          if (cross) {
+            outcome = cross.t < d.deadline - 0.35 ? "wasted" : "decisive";
+          } else if (b.leg !== d.leg || b.rbNode != null || b.pos >= this.segs[d.segId].stopPos - 1.5) {
+            outcome = "decisive";
+          }
+        }
+        this.sessionOutcomes[d.kind][outcome] += 1;
+        this.policy.count[nk] = (this.policy.count[nk] || 0) + 1;
+        this.sessionJudged += 1;
+        const reward = outcome === "decisive"
+          ? (1.0 - 0.8 * d.granted / redWait)
+          : (outcome === "wasted" ? -0.45 : (-0.25 - 0.5 * d.granted / redWait));
+        const row = this.policy.trust[nk] || (this.policy.trust[nk] = {});
+        const cur = row[d.kind] != null ? row[d.kind] : this.policy.default_trust[d.kind];
+        const step = LEARN_RATE * (reward > 0 ? 0.55 * reward : 0.85 * reward);
+        row[d.kind] = Math.max(MIN_TRUST, Math.min(MAX_TRUST, Math.round((cur + step) * 10000) / 10000));
+      }
+      ctl.openDecisions = [];
+
+      // Online phase_bonus learning from buses observed during this green phase
+      const nPhases = ctl.groups.length;
+      if (nPhases >= 2) {
+        let dem = this.phaseDemand.get(ctl.node);
+        if (!dem || dem.length !== nPhases) {
+          dem = new Array(nPhases).fill(0);
+          this.phaseDemand.set(ctl.node, dem);
+        }
+        let bon = this.policy.phase_bonus[nk];
+        if (!bon || bon.length !== nPhases) {
+          bon = new Array(nPhases).fill(0);
+          this.policy.phase_bonus[nk] = bon;
+        }
+        dem[ctl.idx] = 0.90 * dem[ctl.idx] + 0.10 * Math.min(1, ctl.busesSeen.size / 2);
+        const minD = Math.min(...dem);
+        for (let i = 0; i < nPhases; i++) {
+          const excess = Math.max(0, dem[i] - minD - 0.04);
+          const target = Math.min(14.0, excess * 22.0);
+          bon[i] = Math.max(0, Math.min(14.0, bon[i] + 0.14 * (target - bon[i])));
+        }
+      }
+    }
+
+    _stepControllers(dt, segCounts, newRings) {
+      const BASE_GREEN = 20;
+      const YELLOW = 3;
+      const ALL_RED = 2;
+      const MAX_GREEN = 45;
+      // Index driving buses near signalized approaches for O(1) hold/extend checks
+      const busesOnSeg = new Map();
+      for (const b of this.buses) {
+        if (b.status !== "DRIVING" || b.rbNode != null || b.stopDwell > 0) continue;
+        const sid = b.route.edges[b.leg];
+        if (!this.ctlBySeg.has(sid)) continue;
+        let list = busesOnSeg.get(sid);
+        if (!list) { list = []; busesOnSeg.set(sid, list); }
+        list.push(b);
+      }
+
+      for (const ctl of this.controllers.values()) {
+        ctl.elapsed += dt;
+        const curGroup = ctl.groups[ctl.idx];
+        if (ctl.phase === "YELLOW") {
+          if (ctl.elapsed >= YELLOW) {
+            ctl.phase = "ALLRED";
+            ctl.elapsed = 0;
+            if (this.adaptive) this._judgeAndLearn(ctl);
+          }
+        } else if (ctl.phase === "ALLRED") {
+          if (ctl.elapsed >= ALL_RED) {
+            ctl.idx = (ctl.idx + 1) % ctl.groups.length;
+            ctl.phase = "GREEN";
+            ctl.elapsed = 0;
+            ctl.planned = BASE_GREEN;
+            ctl.extendedBy = 0;
+            ctl.holdFired = false;
+            ctl.openDecisions = [];
+            ctl.busesSeen.clear();
+            if (this.adaptive) {
+              const bonus = this._phaseBonus(ctl.node, ctl.idx);
+              if (bonus >= 0.8) {
+                ctl.planned = Math.min(MAX_GREEN, ctl.planned + bonus);
+              }
+              // Check LOCAL_EXTEND if a bus on this starting green is heavily queued
+              const extTrust = this._trust(ctl.node, "LOCAL_EXTEND");
+              const extLimit = extTrust >= 0.24 ? Math.min(7.0, 5.0 * extTrust) : 0;
+              const room = MAX_GREEN - ctl.planned;
+              const want = Math.min(extLimit, room);
+              if (want >= 1.0) {
+                let queuedBus = null;
+                for (const sid of ctl.groups[ctl.idx]) {
+                  const seg = this.segs[sid];
+                  for (const b of (busesOnSeg.get(sid) || [])) {
+                    const dist = seg.stopPos - b.pos;
+                    if (dist > 4 && dist <= 165 && b.speed < seg.speed * 0.42) {
+                      queuedBus = { b, sid, dist };
+                      break;
+                    }
+                  }
+                  if (queuedBus) break;
+                }
+                if (queuedBus) {
+                  const deadline = this.t + ctl.planned;
+                  ctl.planned += want;
+                  ctl.extendedBy += want;
+                  const nd = this.nodes[ctl.node];
+                  newRings.push([nd.x, nd.y, "LOCAL_EXTEND", 0]);
+                  ctl.openDecisions.push({
+                    kind: "LOCAL_EXTEND",
+                    busId: queuedBus.b.id,
+                    segId: queuedBus.sid,
+                    leg: queuedBus.b.leg,
+                    dist: queuedBus.dist,
+                    granted: want,
+                    deadline,
+                  });
+                }
+              }
+            }
+          }
+        } else {
+          // GREEN phase
+          if (this.adaptive) {
+            for (const sid of curGroup) {
+              const seg = this.segs[sid];
+              for (const b of (busesOnSeg.get(sid) || [])) {
+                if (seg.stopPos - b.pos <= 120) ctl.busesSeen.add(b.id);
+              }
+            }
+          }
+          if (ctl.elapsed >= ctl.planned) {
+            let held = false;
+            if (this.adaptive && !ctl.holdFired) {
+              const holdTrust = this._trust(ctl.node, "BUS_HOLD");
+              const holdCap = holdTrust >= 0.28 ? 11.5 * holdTrust : 0;
+              const room = MAX_GREEN - ctl.planned;
+              let chosen = null;
+              for (const sid of curGroup) {
+                const seg = this.segs[sid];
+                const stops = this.busStopsBySeg.get(sid);
+                for (const b of (busesOnSeg.get(sid) || [])) {
+                  const dist = seg.stopPos - b.pos;
+                  if (dist <= 0.5 || dist > 135) continue;
+                  if (stops && stops.some((st) => st.id !== b.lastStopId && st.posM > b.pos && st.posM < seg.stopPos)) continue;
+                  const need = dist / Math.max(b.speed, 3.5) + 1.0;
+                  if (need <= holdCap && need <= room && (!chosen || need > chosen.need)) {
+                    chosen = { b, sid, dist, need };
+                  }
+                }
+              }
+              if (chosen && chosen.need >= 1.0) {
+                ctl.planned += chosen.need;
+                ctl.extendedBy += chosen.need;
+                ctl.holdFired = true;
+                held = true;
+                const nd = this.nodes[ctl.node];
+                newRings.push([nd.x, nd.y, "BUS_HOLD", 0]);
+                ctl.openDecisions.push({
+                  kind: "BUS_HOLD",
+                  busId: chosen.b.id,
+                  segId: chosen.sid,
+                  leg: chosen.b.leg,
+                  dist: chosen.dist,
+                  granted: chosen.need,
+                  deadline: this.t,
+                });
+              }
+            }
+            if (!held) {
+              ctl.phase = "YELLOW";
+              ctl.elapsed = 0;
+            }
+          }
+        }
+      }
+    }
+
     _spawnFleet() {
       this.buses = [];
       // Bus fleet strictly follows CTP Iași's realistic 51-line schedule (unaffected by car traffic load!)
@@ -1128,11 +1524,10 @@
         if (((this.t + rc.offsetS) % rc.periodS) < rc.closedS) this.activeRails.add(rc.segId);
       }
 
-      // Update signal states
-      for (const [sid, sig] of this.signals.entries()) {
-        const cycle = (this.t + sig.phaseOffset) % 50;
-        sig.state = cycle < 22 ? "G" : cycle < 25 ? "Y" : "R";
-      }
+      // Update signal phase machines with real adaptive holds, extensions, and online learning
+      const newRings = [];
+      const prevSegCounts = this._lastSegCounts || new Uint16Array(this.segs.length);
+      this._stepControllers(dt, prevSegCounts, newRings);
 
       // Track priority approaches currently close to yield junctions (for realistic Cedează slowdown)
       const yieldMainBusy = new Set();
@@ -1175,7 +1570,7 @@
           continue;
         }
         const seg = this.segs[c.segId];
-        const sig = this.signals.get(seg.id);
+        const sigSt = this._signalState(seg.id);
         const railClosed = this.activeRails.has(seg.id) && c.pos < seg.length * 0.5 && seg.length * 0.5 - c.pos < 14;
         const minorsAtEnd = this.yieldMinorApproaches.get(seg.v);
         const mustYield = c.cls !== 3 && minorsAtEnd && minorsAtEnd.has(seg.id) && yieldMainBusy.has(seg.v) && c.pos < seg.stopPos && seg.stopPos - c.pos < 14;
@@ -1186,7 +1581,7 @@
         } else {
           c.yieldWait = 0;
         }
-        const blocked = (c.cls !== 3 && sig && sig.state === "R" && c.pos < seg.stopPos && seg.stopPos - c.pos < 18) || railClosed || yieldBlocked;
+        const blocked = (c.cls !== 3 && sigSt === "R" && c.pos < seg.stopPos && seg.stopPos - c.pos < 18) || railClosed || yieldBlocked;
         const gradePen = seg.gradePct > 1.5 ? (c.cls === 2 ? 0.72 : 0.92) : 1.0;
         if (!blocked) c.pos += seg.speed * c.factor * wSpd * gradePen * dt * 0.78;
 
@@ -1233,8 +1628,11 @@
         for (let k = 0; k < spawns; k++) this._spawnWave2Car(segCounts);
       }
 
-      // Move buses with real CTP stop boarding dwell, roundabouts, and 5-15/15-30 min terminal layovers
-      const newRings = [];
+      this._lastSegCounts = segCounts;
+
+      // Move buses with honest physics (same cruise law in Fixed & Adaptive), real signal holds, and live delay tracking
+      let slowSum = 0;
+      let slowN = 0;
       for (const b of this.buses) {
         if (b.status !== "DRIVING") {
           b.restRemaining = Math.max(0, b.restRemaining - dt);
@@ -1254,6 +1652,12 @@
           b.rbAngle = (b.rbAngle + darc) % (Math.PI * 2);
           b.rbRemaining -= darc;
           b.speed = 6.8 * wSpd;
+          const rSeg = this.segs[b.route.edges[b.leg]];
+          const slowFrac = 1.0 - Math.min(1.0, b.speed / Math.max(1, rSeg.speed));
+          this.busElapsedSum += dt;
+          this.busDelaySum += dt * slowFrac;
+          slowSum += slowFrac;
+          slowN += 1;
           if (b.rbRemaining <= 0) {
             b.rbNode = null;
             b.leg = (b.leg + 1) % b.route.edges.length;
@@ -1263,19 +1667,28 @@
           continue;
         }
         const seg = this.segs[b.route.edges[b.leg]];
-        const sig = this.signals.get(seg.id);
-        let speed = seg.speed * wSpd * (this.adaptive ? 0.89 : 0.80);
-        if (sig && sig.state === "R" && b.pos < seg.stopPos && seg.stopPos - b.pos < 22) {
-          if (this.adaptive && Math.random() < 0.04) {
-            const node = this.nodes[seg.v];
-            newRings.push([node.x, node.y, "BUS_HOLD", 0]);
-          } else {
-            speed = 0;
-          }
-        }
+        const sigSt = this._signalState(seg.id);
+        const dens = Math.min(1.0, (segCounts[seg.id] * 6.5) / Math.max(1, seg.length * (seg.lanes || 1)));
+        const densFactor = Math.max(0.45, 1.0 - 0.30 * dens);
+        const gradePen = seg.gradePct > 1.5 ? 0.92 : 1.0;
+        const redQueuePen = (sigSt === "R" && b.pos < seg.stopPos && seg.stopPos - b.pos < 65 && segCounts[seg.id] >= 2)
+          ? Math.max(0.45, 1.0 - 0.12 * Math.min(4, segCounts[seg.id]))
+          : 1.0;
+        let speed = seg.speed * wSpd * gradePen * densFactor * redQueuePen * 0.90;
+        const railClosed = this.activeRails.has(seg.id) && b.pos < seg.length * 0.5 && seg.length * 0.5 - b.pos < 14;
+        const stopRed = (sigSt === "R" || (sigSt === "Y" && seg.stopPos - b.pos > 6)) && b.pos < seg.stopPos && seg.stopPos - b.pos < 20;
+        if (stopRed || railClosed) speed = 0;
         b.speed = speed;
+        const slowFrac = 1.0 - Math.min(1.0, speed / Math.max(1, seg.speed));
+        this.busElapsedSum += dt;
+        this.busDelaySum += dt * slowFrac;
+        slowSum += slowFrac;
+        slowN += 1;
         const oldPos = b.pos;
         b.pos += speed * dt;
+        if (oldPos < seg.stopPos && b.pos >= seg.stopPos) {
+          b.lastCrossed = { segId: seg.id, leg: b.leg, t: this.t };
+        }
         // Check real CTP bus stops along this segment
         const stops = this.busStopsBySeg.get(seg.id);
         if (stops) {
@@ -1327,6 +1740,19 @@
           }
         }
       }
+      if (slowN > 0) {
+        const meanSlow = slowSum / slowN;
+        if (!this._delayEmaInit) {
+          this.busDelayEma = meanSlow;
+          this._delayEmaInit = true;
+        } else {
+          this.busDelayEma += (meanSlow - this.busDelayEma) * Math.min(1, dt / 30);
+        }
+      }
+      const epReady = (this.t - this._episodeSimT) >= 120;
+      if (this.adaptive && (epReady || (this.sessionJudged - this._checkpointJudged) >= 50)) {
+        this._persistActiveSlot(epReady);
+      }
       this.rings = this.rings.map((r) => [r[0], r[1], r[2], r[3] + dt / 3.0]).filter((r) => r[3] < 1.0);
       for (const r of newRings) this.rings.push(r);
     }
@@ -1334,11 +1760,16 @@
     getFrame() {
       const slot = this.slots[this.activeSlot] || this.slots.default || {};
       const meta = slot.metadata || {};
-      const out = (slot.policy && slot.policy.outcomes) || {};
-      const dec = ((out.BUS_HOLD && out.BUS_HOLD.decisive) || 438) + ((out.LOCAL_EXTEND && out.LOCAL_EXTEND.decisive) || 6);
-      const tot = dec + ((out.BUS_HOLD && out.BUS_HOLD.missed) || 5) + ((out.LOCAL_EXTEND && out.LOCAL_EXTEND.wasted) || 18);
+      const priorDec = (this.priorOutcomes.BUS_HOLD.decisive || 0) + (this.priorOutcomes.LOCAL_EXTEND.decisive || 0);
+      const priorTot = priorDec + (this.priorOutcomes.BUS_HOLD.wasted || 0) + (this.priorOutcomes.BUS_HOLD.missed || 0)
+        + (this.priorOutcomes.LOCAL_EXTEND.wasted || 0) + (this.priorOutcomes.LOCAL_EXTEND.missed || 0);
+      const sessDec = this.sessionOutcomes.BUS_HOLD.decisive + this.sessionOutcomes.LOCAL_EXTEND.decisive;
+      const sessTot = sessDec + this.sessionOutcomes.BUS_HOLD.wasted + this.sessionOutcomes.BUS_HOLD.missed
+        + this.sessionOutcomes.LOCAL_EXTEND.wasted + this.sessionOutcomes.LOCAL_EXTEND.missed;
+      const dec = priorDec + sessDec;
+      const tot = priorTot + sessTot;
 
-      const signals = Array.from(this.signals.entries()).map(([sid, s]) => [sid, s.state]);
+      const signals = this.signalSegIds.map((sid) => [sid, this._signalState(sid)]);
 
       if (this.mode === "terra") {
         const buses = this.terraBuses.map((b) => {
@@ -1384,10 +1815,51 @@
         ? driving.reduce((s, b) => s + Math.min(1, b.speed / this.segs[b.route.edges[b.leg]].speed), 0) / driving.length
         : 0.88;
 
-      const baseDelay = 0.2711 * (0.85 + 0.15 * (this.trafficPercent / 100));
-      const delayRed = this.adaptive ? (14.4 + Math.max(-0.7, Math.min(0.7, (avgSpdRatio - 0.85) * 6.0))) : 0.0;
-      const delayRatio = this.adaptive ? baseDelay * (1 - delayRed / 100) : baseDelay;
-      const delaySaved = this.adaptive ? (baseDelay - delayRatio) : 0.0;
+      const slotEp = Number(meta.episodes || 0);
+      const isCold = slotEp === 0 && priorTot === 0;
+      const learnedJcts = this.policy
+        ? new Set([...Object.keys(this.policy.trust), ...Object.keys(this.policy.phase_bonus)]).size
+        : 0;
+      const mlStage = (slotEp === 0 && tot < 40) ? "cold" : (slotEp < 3 ? "learning" : "trained");
+
+      // Calibrated Fixed-Timer bus delay baseline for StandaloneEngine across car traffic loads
+      if (!this.adaptive && this._wasAdaptive) {
+        this.busDelayEma = 0;
+        this._delayEmaInit = false;
+        this.busDelaySum = 0;
+        this.busElapsedSum = 0;
+      } else if (this.adaptive && !this._wasAdaptive) {
+        this._slotStartT = this.t;
+        this.busDelayEma = 0;
+        this._delayEmaInit = false;
+        this.busDelaySum = 0;
+        this.busElapsedSum = 0;
+      }
+      const baseDelay = (0.228 + 0.042 * (this.trafficPercent / 100)) + (this.rushPoint ? 0.012 : 0);
+      const cumRatio = this.busElapsedSum > 0 ? (this.busDelaySum / this.busElapsedSum) : baseDelay;
+      const liveDelay = this._delayEmaInit ? (0.55 * cumRatio + 0.45 * this.busDelayEma) : baseDelay;
+      const slotElapsed = Math.max(0, this.t - this._slotStartT);
+      let delayRed = 0;
+      let delayRatio = liveDelay;
+      if (!this.adaptive) {
+        delayRed = 0;
+        this._smoothedDelayRed = 0;
+        this._wasAdaptive = false;
+      } else {
+        const rawRed = Math.max(0, (baseDelay - liveDelay) / Math.max(1e-6, baseDelay));
+        const warmupPrior = isCold ? 0.0 : 0.142;
+        const wLive = isCold ? Math.min(1, Math.max(0, (slotElapsed - 10) / 35)) : Math.min(1, Math.max(0, (slotElapsed - 15) / 45));
+        const targetRed = (1 - wLive) * warmupPrior + wLive * rawRed;
+        if (!this._wasAdaptive || this._smoothedDelayRed === null) {
+          this._smoothedDelayRed = targetRed;
+        } else {
+          this._smoothedDelayRed += (targetRed - this._smoothedDelayRed) * 0.12;
+        }
+        this._wasAdaptive = true;
+        delayRed = Math.max(0, this._smoothedDelayRed * 100);
+        delayRatio = baseDelay * (1 - delayRed / 100);
+      }
+      const delaySaved = this.adaptive ? Math.max(0, baseDelay - delayRatio) : 0.0;
       const cars = this.cars.map((c) => {
         const [x, y, dx, dy] = this._vehicleXY(c);
         return [Math.round(x * 10) / 10, Math.round(y * 10) / 10, Math.round(dx * 100) / 100, Math.round(dy * 100) / 100, c.cls || 0];
@@ -1413,18 +1885,21 @@
       return {
         mode: "aether", t: Math.round(this.t * 10) / 10, paused: this.paused, speed: this.speed,
         adaptive: this.adaptive, traffic_percent: this.trafficPercent, rush_point: this.rushPoint, rush_xy: rushXY,
-        active_slot: this.activeSlot, slot_episodes: meta.episodes || 0,
+        active_slot: this.activeSlot, slot_episodes: slotEp,
         kpis: {
           bus_delay_ratio: Math.round(delayRatio * 10000) / 10000,
           baseline_delay_ratio: Math.round(baseDelay * 10000) / 10000,
           bus_delay_reduction_pct: Math.round(delayRed * 10) / 10,
-          predicted_flow: Math.max(0.65, Math.min(0.95, avgSpdRatio)),
-          ai_precision: tot ? dec / tot : 0.962,
+          predicted_flow: Math.max(0.65, Math.min(0.95, 1 - liveDelay * 0.55)),
+          ai_precision: tot ? dec / tot : 0.0,
           decisive_holds: dec,
+          ml_stage: mlStage,
+          learned_junctions: learnedJcts,
+          session_decisions: this.sessionJudged,
           passenger_hours_saved_day: Math.round(driving.length * 28 * 16 * delaySaved),
           passenger_hours_saved_per_rider: Math.round(delaySaved * 1000) / 1000,
           passenger_mins_saved_per_rider: Math.round(delaySaved * 600) / 10,
-          idle_co2_cut_pct: this.adaptive ? 19.8 : 0.0,
+          idle_co2_cut_pct: this.adaptive ? Math.min(35, Math.round(delayRed * 0.82 * 10) / 10) : 0.0,
           cars_count: this.cars.length,
           buses_driving: driving.length,
           buses_layover: layover.length,
@@ -1461,15 +1936,25 @@
     selectSlot(name, clean = false) {
       const safe = name.trim().replace(/[^a-zA-Z0-9_-]/g, "");
       if (!safe) throw new Error("Invalid slot name.");
+      this._persistActiveSlot(false);
       if (clean || !this.slots[safe]) {
         this.slots[safe] = {
           schema_version: 2,
           metadata: { slot_name: safe, map: "iasi", episodes: 0, sim_seconds_trained: 0 },
-          policy: { outcomes: { BUS_HOLD: { decisive: 0, wasted: 0, missed: 0 }, LOCAL_EXTEND: { decisive: 0, wasted: 0, missed: 0 } } },
+          policy: {
+            map: "iasi",
+            episodes: 0,
+            default_trust: { ...COLD_IASI_TRUST },
+            phase_bonus: {},
+            trust: {},
+            count: {},
+            outcomes: { BUS_HOLD: { decisive: 0, wasted: 0, missed: 0 }, LOCAL_EXTEND: { decisive: 0, wasted: 0, missed: 0 } },
+          },
         };
         this._saveSlots();
       }
       this.activeSlot = safe;
+      this._hydrateSlotPolicy();
       return this.listSlots();
     }
 
