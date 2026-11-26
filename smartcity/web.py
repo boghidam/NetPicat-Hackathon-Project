@@ -493,19 +493,26 @@ class EngineState:
             pax_hrs_per_rider = delay_saved_abs * 1.0
             co2_cut_pct = max(0.0, min(35.0, delay_reduction * 0.82 * 100.0))
 
-            # Cars / Vans / Trucks / Ambulances (visual context + class id: 0=car, 1=van, 2=truck, 3=ambulance)
+            # Cars / Vans / Trucks / Ambulances: [x, y, dx, dy, cls_id, lat_off, spd_ratio]
             cls_map = {"car": 0, "van": 1, "truck": 2, "ambulance": 3}
             cars = []
             for v in sim.model.iter_vehicles():
                 if v.kind == "car":
+                    seg = net.segments[v.seg]
                     x, y, dx, dy = sim.model.vehicle_xy(v)
-                    cars.append([round(x, 1), round(y, 1), round(dx, 2), round(dy, 2), cls_map.get(v.vehicle_class, 0)])
+                    lat_off = sim.model.vehicle_lat_offset(v)
+                    spd_ratio = min(1.0, v.v / max(1.0, seg.speed_limit))
+                    cars.append([
+                        round(x, 1), round(y, 1), round(dx, 2), round(dy, 2),
+                        cls_map.get(v.vehicle_class, 0), round(lat_off, 2), round(spd_ratio, 2),
+                    ])
 
             # Buses (driving, boarding at CTP stops/bays, or parked at terminus layover/break)
             buses = []
             for b in sim.fleet.buses:
                 seg = net.segments[b.seg]
                 x, y, dx, dy = sim.model.vehicle_xy(b)
+                lat_off = sim.model.vehicle_lat_offset(b)
                 spd_ratio = round(min(1.0, b.v / seg.speed_limit), 2) if b.status == "DRIVING" else 0.0
                 at_stop = 1 if (b.stop_dwell > 0.0 or b.in_bus_bay) else 0
                 buses.append(
@@ -521,6 +528,7 @@ class EngineState:
                         round(b.rest_remaining / 60.0, 1),
                         at_stop,
                         round(b.length, 1),
+                        round(lat_off, 2),
                     ]
                 )
 
