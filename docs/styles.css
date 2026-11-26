@@ -1014,19 +1014,85 @@ button, select, input {
   gap: 10px;
   font-size: 12.5px;
   color: var(--ink-muted);
+  touch-action: pan-x;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .slider-row input[type="range"] {
   flex: 1;
-  accent-color: var(--kelly-green);
+  -webkit-appearance: none;
+  appearance: none;
+  height: 24px;
+  background: transparent;
   cursor: pointer;
+  touch-action: pan-x;
+  margin: 0;
+}
+
+.slider-row input[type="range"]::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    var(--kelly-green) 0%,
+    var(--kelly-green) var(--slider-pct, 33.3%),
+    var(--bone-white) var(--slider-pct, 33.3%),
+    var(--bone-white) 100%
+  );
+}
+
+.slider-row input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  margin-top: -6px;
+  border-radius: 50%;
+  background: var(--kelly-green);
+  border: 2.5px solid var(--snow-white);
+  box-shadow: 0 1px 5px rgba(15, 61, 46, 0.32);
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.slider-row input[type="range"]:active::-webkit-slider-thumb {
+  transform: scale(1.14);
+  box-shadow: 0 0 0 5px rgba(22, 163, 74, 0.22);
+}
+
+.slider-row input[type="range"]::-moz-range-track {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--bone-white);
+}
+
+.slider-row input[type="range"]::-moz-range-progress {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--kelly-green);
+}
+
+.slider-row input[type="range"]::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--kelly-green);
+  border: 2.5px solid var(--snow-white);
+  box-shadow: 0 1px 5px rgba(15, 61, 46, 0.32);
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.slider-row input[type="range"]:active::-moz-range-thumb {
+  transform: scale(1.14);
+  box-shadow: 0 0 0 5px rgba(22, 163, 74, 0.22);
 }
 
 .slider-row strong {
-  min-width: 42px;
+  min-width: 44px;
   text-align: right;
   color: var(--ink);
   font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
 }
 
 .select-wrap select {
@@ -1868,7 +1934,27 @@ button, select, input {
   }
 
   .slider-row input[type="range"] {
-    height: 26px;
+    height: 32px;
+  }
+
+  .slider-row input[type="range"]::-webkit-slider-runnable-track {
+    height: 7px;
+  }
+
+  .slider-row input[type="range"]::-webkit-slider-thumb {
+    width: 24px;
+    height: 24px;
+    margin-top: -8.5px;
+  }
+
+  .slider-row input[type="range"]::-moz-range-track,
+  .slider-row input[type="range"]::-moz-range-progress {
+    height: 7px;
+  }
+
+  .slider-row input[type="range"]::-moz-range-thumb {
+    width: 24px;
+    height: 24px;
   }
 
   .select-wrap select {

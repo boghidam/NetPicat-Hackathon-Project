@@ -32,6 +32,10 @@
     hoverMouse: { x: -1, y: -1 },
     speeds: [1, 2, 4, 8],
     speedIdx: 0,
+    trafficSliderDragging: false,
+    trafficSliderPendingVal: null,
+    trafficSliderHoldUntil: 0,
+    trafficSliderLastSent: null,
   };
 
   // DOM helpers
@@ -41,6 +45,13 @@
   const workspaceEl = document.querySelector(".workspace");
   const mapControlsEl = document.querySelector(".map-controls");
   const drawerInnerEl = $("drawer") ? $("drawer").querySelector(".drawer-inner") : null;
+
+  function updateTrafficSliderTrack(val) {
+    const sl = $("trafficSlider");
+    if (!sl) return;
+    const pct = Math.max(0, Math.min(100, (Number(val) / 300) * 100));
+    sl.style.setProperty("--slider-pct", `${pct}%`);
+  }
 
   function applyTheme(theme) {
     const t = theme === "dark" ? "dark" : "light";
@@ -354,8 +365,20 @@
     $("btnCtrlFixed").classList.toggle("active", !f.adaptive);
     $("btnPlayPause").textContent = f.paused ? "Resume" : "Pause";
     $("btnSpeed").textContent = `${f.speed}× Speed`;
-    $("trafficVal").textContent = `${Math.round(f.traffic_percent)}%`;
-    if (document.activeElement !== $("trafficSlider")) $("trafficSlider").value = Math.min(300, Math.round(f.traffic_percent));
+    const simTraffic = Math.min(300, Math.max(0, Math.round(f.traffic_percent)));
+    if (state.trafficSliderPendingVal !== null && simTraffic === state.trafficSliderPendingVal) {
+      state.trafficSliderPendingVal = null;
+      state.trafficSliderHoldUntil = 0;
+    }
+    const sliderLocked =
+      state.trafficSliderDragging ||
+      (state.trafficSliderPendingVal !== null && performance.now() < state.trafficSliderHoldUntil);
+    if (!sliderLocked) {
+      $("trafficVal").textContent = `${simTraffic}%`;
+      const sl = $("trafficSlider");
+      if (sl && Number(sl.value) !== simTraffic) sl.value = String(simTraffic);
+      updateTrafficSliderTrack(simTraffic);
+    }
     if (document.activeElement !== $("rushSelect")) $("rushSelect").value = f.rush_point || "";
 
     // Realism controls sync (Weather, Day Cycle, Urban Friction)
@@ -1512,7 +1535,7 @@
       });
       el.addEventListener("click", (e) => {
         if (!isMobile()) return;
-        if (e.target.closest("input, select, button")) return;
+        if (e.target.closest("input, select, button, .slider-row")) return;
         e.stopPropagation();
         if (!tipEl.classList.contains("hidden") && tipEl.dataset.activeKey === el.dataset.tip) {
           tipEl.classList.add("hidden");
@@ -1724,8 +1747,8 @@
     // Pull down on .drawer-inner when scrolled to top to collapse half/full sheet naturally
     if (drawerInnerEl) {
       drawerInnerEl.addEventListener("touchstart", (e) => {
-        if (!isMobile() || state.mobileSnap === "peek" || e.touches.length !== 1) return;
-        if (e.target.closest("input, select, option")) return;
+        if (!isMobile() || state.mobileSnap === "peek" || !e.touches || e.touches.length !== 1) return;
+        if (e.target.closest("input, select, option, .slider-row")) return;
         if (drawerInnerEl.scrollTop <= 0) {
           lastTouchMs = Date.now();
           beginSheetDrag(e.touches[0].clientX, e.touches[0].clientY, !!e.target.closest("button"), true);
@@ -1862,8 +1885,54 @@
     // Aether Quick Controls
     $("btnCtrlAdaptive").onclick = () => sendCmd({ cmd: "set_adaptive", adaptive: true });
     $("btnCtrlFixed").onclick = () => sendCmd({ cmd: "set_adaptive", adaptive: false });
-    $("trafficSlider").oninput = (e) => { $("trafficVal").textContent = `${e.target.value}%`; };
-    $("trafficSlider").onchange = (e) => sendCmd({ cmd: "set_traffic", percent: Number(e.target.value) });
+    const trafficSlider = $("trafficSlider");
+    let trafficSendTimer = null;
+    const commitTraffic = (rawVal, immediate = false) => {
+      const val = Math.min(300, Math.max(0, Math.round(Number(rawVal) / 10) * 10));
+      $("trafficVal").textContent = `${val}%`;
+      updateTrafficSliderTrack(val);
+      state.trafficSliderPendingVal = val;
+      state.trafficSliderHoldUntil = performance.now() + 800;
+      const dispatch = () => {
+        trafficSendTimer = null;
+        if (state.trafficSliderLastSent === val && !immediate) return;
+        state.trafficSliderLastSent = val;
+        sendCmd({ cmd: "set_traffic", percent: val });
+      };
+      if (immediate) {
+        if (trafficSendTimer) {
+          clearTimeout(trafficSendTimer);
+          trafficSendTimer = null;
+        }
+        dispatch();
+      } else if (!trafficSendTimer) {
+        trafficSendTimer = setTimeout(dispatch, 90);
+      }
+    };
+    const startTrafficDrag = () => {
+      state.trafficSliderDragging = true;
+      state.trafficSliderHoldUntil = performance.now() + 800;
+    };
+    const endTrafficDrag = () => {
+      if (!state.trafficSliderDragging) return;
+      state.trafficSliderDragging = false;
+      commitTraffic(trafficSlider.value, true);
+    };
+    trafficSlider.addEventListener("pointerdown", startTrafficDrag);
+    trafficSlider.addEventListener("mousedown", startTrafficDrag);
+    trafficSlider.addEventListener("touchstart", startTrafficDrag, { passive: true });
+    window.addEventListener("pointerup", endTrafficDrag);
+    window.addEventListener("pointercancel", endTrafficDrag);
+    window.addEventListener("mouseup", endTrafficDrag);
+    window.addEventListener("touchend", endTrafficDrag, { passive: true });
+    window.addEventListener("touchcancel", endTrafficDrag, { passive: true });
+    trafficSlider.oninput = (e) => commitTraffic(e.target.value, false);
+    trafficSlider.onchange = (e) => {
+      state.trafficSliderDragging = false;
+      commitTraffic(e.target.value, true);
+    };
+    updateTrafficSliderTrack(trafficSlider.value);
+
     $("rushSelect").onchange = (e) => sendCmd({ cmd: "set_rush", rush_point: e.target.value || null });
     $("btnPlayPause").onclick = () => sendCmd({ cmd: "set_paused", paused: !(state.frame && state.frame.paused) });
     $("btnSpeed").onclick = () => {
@@ -1871,7 +1940,13 @@
       sendCmd({ cmd: "set_speed", speed: state.speeds[state.speedIdx] });
     };
     $("btnIncident").onclick = () => sendCmd({ cmd: "trigger_incident" });
-    $("btnResetSim").onclick = () => sendCmd({ cmd: "reset_sim" });
+    $("btnResetSim").onclick = () => {
+      state.trafficSliderDragging = false;
+      state.trafficSliderPendingVal = null;
+      state.trafficSliderHoldUntil = 0;
+      state.trafficSliderLastSent = null;
+      sendCmd({ cmd: "reset_sim" });
+    };
 
     // Realism & Scenarios Controls
     ["btnWeatherClear", "btnWeatherRain", "btnWeatherSnow"].forEach((id) => {
