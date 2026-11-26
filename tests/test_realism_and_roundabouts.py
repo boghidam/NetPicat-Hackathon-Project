@@ -225,16 +225,12 @@ def test_roundabouts_never_deadlock_or_cross_center_island() -> None:
     net = build_city("iasi", cfg)
     sim = Simulation(cfg, adaptive=True, net=net, map_name="iasi")
     sim.run(120.0)
-    # 1. No vehicle connected to or inside a roundabout may ever be rendered inside its green center island
-    #    (grade-separated underpasses/overpasses such as Pasajul Mihai Eminescu beneath Rond Fundație are excluded)
+    # 1. No vehicle may ever be rendered inside any roundabout's green center island
     for v in sim.model.iter_vehicles():
         if v.kind == "blocker":
             continue
-        seg = net.segments[v.seg]
         x, y, _, _ = sim.model.vehicle_xy(v)
         for rb in net.roundabouts:
-            if v.rb_node != rb.node and seg.from_node != rb.node and seg.to_node != rb.node:
-                continue
             island_r = rb.radius_m - (4.7 if rb.ring_lanes >= 2 else 2.1)
             dist = math.hypot(x - rb.x, y - rb.y)
             assert dist >= island_r - 0.25, f"{v.id} entered center island of {rb.name} (dist={dist:.1f} < {island_r:.1f})"

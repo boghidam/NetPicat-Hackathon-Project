@@ -891,22 +891,6 @@
       return Math.max(6, rb.radius + 0.7 - laneV * 3.6);
     }
 
-    _vehLen(v) {
-      if (v.len) return v.len;
-      if (v.route && v.line) return 11.4;
-      const cls = v.cls || 0;
-      return cls === 2 ? 10.6 : cls === 3 ? 6.2 : cls === 1 ? 5.8 : 4.5;
-    }
-
-    _vehicleLatOff(c) {
-      if (c.rbNode != null) return 0.0;
-      if (c.status && c.status !== "DRIVING") return 0.0;
-      const seg = this.segs[c.segId];
-      if (!seg) return 0.0;
-      const laneV = c.laneVisual != null ? c.laneVisual : (c.lane || 0);
-      return this._laneOffset(seg, laneV) + (c.inBay ? 2.3 : 0);
-    }
-
     _vehicleXY(c) {
       if (c.rbNode != null) {
         const rb = this.roundaboutByNode.get(c.rbNode);
@@ -929,8 +913,7 @@
           return [loop.x + rBay * ca, loop.y + rBay * sa, -sa, ca];
         }
       }
-      const len = this._vehLen(c);
-      let posDraw = Math.max(0, c.pos - len * 0.5);
+      let posDraw = Math.max(0, c.pos);
       const rbFrom = this.roundaboutByNode.get(seg.u);
       const rbTo = this.roundaboutByNode.get(seg.v);
       const rStart = rbFrom ? Math.min(rbFrom.radius + 2.5, seg.length * 0.35) : 0;
@@ -945,8 +928,7 @@
         }
       }
       const [x, y, dx, dy] = this._posOnSeg(seg, posDraw);
-      const laneV = c.laneVisual != null ? c.laneVisual : (c.lane || 0);
-      const off = this._laneOffset(seg, laneV) + (c.inBay ? 2.3 : 0);
+      const off = this._laneOffset(seg, c.lane || 0) + (c.inBay ? 2.3 : 0);
       return [x + dy * off, y - dx * off, dx, dy];
     }
 
@@ -961,19 +943,13 @@
     setUrbanFriction(on) {
       this.urbanFriction = !!on;
       this.frictionPts = [];
-      this.frictionBlockers = [];
       if (this.urbanFriction) {
         const multi = this.segs.filter((s) => s.lanes >= 2 && s.length >= 130 && this.citySegSet.has(s.id));
-        const used = new Set();
         for (let k = 0; k < Math.min(6, multi.length); k++) {
           const s = multi[Math.floor(Math.random() * multi.length)];
-          if (used.has(s.id)) continue;
-          used.add(s.id);
-          const pos = s.length * 0.5;
-          const [x, y, dx, dy] = this._posOnSeg(s, pos);
+          const [x, y, dx, dy] = this._posOnSeg(s, s.length * 0.5);
           const off = this._laneOffset(s, 0);
           this.frictionPts.push([Math.round((x + dy * off) * 10) / 10, Math.round((y - dx * off) * 10) / 10]);
-          this.frictionBlockers.push({ segId: s.id, lane: 0, pos, len: 5.8, v: 0, isBlocker: true });
         }
       }
     }
@@ -987,10 +963,9 @@
         if (!mid || mid.length < 3) continue;
         const route = [...mid, dest.segId];
         const seg = this.segs[route[0]];
-        const lane = Math.max(0, (seg.lanes || 1) - 1);
         this.cars.push({
-          route, leg: 0, segId: route[0], pos: 6, v: seg.speed * 0.9, len: 6.2, factor: 1.32,
-          tripKind: "emergency", destPos: dest.posM, lane, laneVisual: lane, lcCooldown: 0, cls: 3, rbNode: null,
+          route, leg: 0, segId: route[0], pos: 6, factor: 1.32,
+          tripKind: "emergency", destPos: dest.posM, lane: seg.lanes - 1, cls: 3, rbNode: null,
         });
         return;
       }
@@ -1135,34 +1110,6 @@
       return null;
     }
 
-    _isLanePosFree(segId, lane, pos, len) {
-      const gap = 2.4;
-      for (let i = 0; i < this.cars.length; i++) {
-        const u = this.cars[i];
-        if (u.rbNode != null || u.segId !== segId || (u.lane || 0) !== lane) continue;
-        const uLen = u.len || 4.5;
-        if (u.pos >= pos) {
-          if (u.pos - uLen - pos < gap) return false;
-        } else {
-          if (pos - len - u.pos < gap) return false;
-        }
-      }
-      if (lane === 0) {
-        for (let i = 0; i < this.buses.length; i++) {
-          const b = this.buses[i];
-          if (b.status !== "DRIVING" || b.rbNode != null || b.inBay) continue;
-          if (b.route.edges[b.leg] !== segId) continue;
-          const bLen = b.len || 11.4;
-          if (b.pos >= pos) {
-            if (b.pos - bLen - pos < gap) return false;
-          } else {
-            if (pos - len - b.pos < gap) return false;
-          }
-        }
-      }
-      return true;
-    }
-
     _placeCarOnRoute(route, tripKind, destPos, startMinPos) {
       let totalW = 0;
       const cumW = [];
@@ -1174,35 +1121,21 @@
         cumW.push(totalW);
       }
       if (totalW <= 0) return null;
+      const r = Math.random() * totalW;
+      let leg = 0;
+      while (leg < cumW.length - 1 && cumW[leg] < r) leg++;
+      const s = this.segs[route[leg]];
+      const lo = leg === 0 ? startMinPos : 4;
+      const hi = (destPos != null && leg === route.length - 1) ? Math.min(s.stopPos - 4, destPos - 5) : (s.stopPos - 4);
+      const pos = hi > lo + 1 ? lo + Math.random() * (hi - lo) : Math.max(0, Math.min(s.length * 0.5, hi));
       const rCls = Math.random();
       const cls = rCls < (tripKind === "through_city" ? 0.14 : 0.05) ? 2 : (rCls < 0.22 ? 1 : 0);
-      const len = cls === 2 ? 10.6 : (cls === 1 ? 5.8 : 4.5);
-      for (let attempt = 0; attempt < 4; attempt++) {
-        const r = Math.random() * totalW;
-        let leg = 0;
-        while (leg < cumW.length - 1 && cumW[leg] < r) leg++;
-        const s = this.segs[route[leg]];
-        const lo = leg === 0 ? startMinPos : 5;
-        const hi = (destPos != null && leg === route.length - 1) ? Math.min(s.stopPos - 4, destPos - 6) : (s.stopPos - 4);
-        if (hi <= lo + 1) continue;
-        const pos = lo + Math.random() * (hi - lo);
-        const nLanes = s.lanes || 1;
-        const prefCurb = destPos != null && leg === route.length - 1;
-        const order = prefCurb
-          ? Array.from({ length: nLanes }, (_, k) => k)
-          : Array.from({ length: nLanes }, (_, k) => (k + Math.floor(Math.random() * nLanes)) % nLanes);
-        for (const lane of order) {
-          if (this._isLanePosFree(s.id, lane, pos, len)) {
-            return {
-              route, leg, segId: s.id, pos, v: s.speed * 0.6, len,
-              factor: (cls === 2 ? 0.80 : cls === 1 ? 0.92 : 1.0) * (0.88 + Math.random() * 0.18),
-              tripKind, destPos: destPos != null ? destPos : null,
-              lane, laneVisual: lane, lcCooldown: 0, cls, rbNode: null,
-            };
-          }
-        }
-      }
-      return null;
+      const lane = (destPos != null && leg === route.length - 1) ? 0 : Math.floor(Math.random() * (s.lanes || 1));
+      return {
+        route, leg, segId: route[leg], pos,
+        factor: (cls === 2 ? 0.80 : cls === 1 ? 0.92 : 1.0) * (0.88 + Math.random() * 0.18),
+        tripKind, destPos: destPos != null ? destPos : null, lane, cls, rbNode: null,
+      };
     }
 
     _posOnSeg(seg, distM) {
@@ -1427,13 +1360,10 @@
 
     _spawnFleet() {
       this.buses = [];
-      const artLines = new Set(["19", "28", "30", "42", "43", "46", "52"]);
-      const miniLines = new Set(["18", "23b", "48", "49", "53", "104", "204", "501b", "503b", "603", "802b"]);
       // Bus fleet strictly follows CTP Iași's realistic 51-line schedule (unaffected by car traffic load!)
       let bid = 0;
       for (const r of this.routes) {
         const n = Math.max(0, Math.round(this.baseLineCounts[r.ref] ?? 2));
-        const bLen = artLines.has(r.ref) ? 12.6 : (miniLines.has(r.ref) ? 8.4 : 11.0);
         for (let k = 0; k < n; k++) {
           const leg = Math.floor((k / Math.max(1, n)) * r.edges.length);
           const seg = this.segs[r.edges[leg]];
@@ -1442,12 +1372,8 @@
             line: r.ref,
             route: r,
             leg,
-            segId: seg.id,
-            pos: Math.random() * Math.max(4, seg.stopPos - 8),
-            speed: seg.speed * 0.8,
-            len: bLen,
-            lane: 0,
-            laneVisual: 0,
+            pos: Math.random() * seg.length * 0.7,
+            speed: seg.speed * 0.85,
             status: "DRIVING",
             restRemaining: 0,
             stopsSinceBreak: Math.floor(Math.random() * 3),
@@ -1521,24 +1447,7 @@
       deficits.sort((a, b) => b[1] - a[1]);
       const kind = deficits[0][0];
 
-      const isUncrowded = (segId, maxDens) => (segCounts[segId] * 6.5) / Math.max(1, this.segs[segId].length * (this.segs[segId].lanes || 1)) < maxDens;
-      const sampleProfile = () => {
-        const rCls = Math.random();
-        const cls = rCls < (kind === "through_city" ? 0.14 : 0.05) ? 2 : (rCls < 0.22 ? 1 : 0);
-        const len = cls === 2 ? 10.6 : (cls === 1 ? 5.8 : 4.5);
-        const factor = (cls === 2 ? 0.80 : cls === 1 ? 0.92 : 1.0) * (0.88 + Math.random() * 0.18);
-        return { cls, len, factor };
-      };
-      const pickSpawnLane = (segId, pos, len, prefCurb) => {
-        const nL = this.segs[segId].lanes || 1;
-        const order = prefCurb
-          ? Array.from({ length: nL }, (_, k) => k)
-          : Array.from({ length: nL }, (_, k) => (k + Math.floor(Math.random() * nL)) % nL);
-        for (const l of order) {
-          if (this._isLanePosFree(segId, l, pos, len)) return l;
-        }
-        return -1;
-      };
+      const isUncrowded = (segId, maxDens) => (segCounts[segId] * 6.5) / Math.max(1, this.segs[segId].length) < maxDens;
 
       if (kind === "city_to_building" && this.cityBldgPool.length) {
         for (let t = 0; t < 14; t++) {
@@ -1546,14 +1455,9 @@
           if (!isUncrowded(orig.segId, 0.30)) continue;
           const trip = this._makeBuildingTrip(orig, 1000, 8000);
           if (!trip) continue;
-          const { cls, len, factor } = sampleProfile();
-          const lane = pickSpawnLane(orig.segId, orig.posM, len, true);
-          if (lane < 0) continue;
           this.cars.push({
             route: trip.route, leg: 0, segId: orig.segId, pos: orig.posM,
-            v: this.segs[orig.segId].speed * 0.45, len, factor,
-            tripKind: "city_to_building", destPos: trip.dest.posM,
-            lane, laneVisual: lane, lcCooldown: 0, cls, rbNode: null,
+            factor: 0.85 + Math.random() * 0.2, tripKind: "city_to_building", destPos: trip.dest.posM,
           });
           this.activeByKind.city_to_building++;
           segCounts[orig.segId]++;
@@ -1566,14 +1470,9 @@
             if (!isUncrowded(orig.segId, 0.30)) continue;
             const trip = this._makeBuildingTrip(orig, 5000, 20000);
             if (!trip) continue;
-            const { cls, len, factor } = sampleProfile();
-            const lane = pickSpawnLane(orig.segId, orig.posM, len, true);
-            if (lane < 0) continue;
             this.cars.push({
               route: trip.route, leg: 0, segId: orig.segId, pos: orig.posM,
-              v: this.segs[orig.segId].speed * 0.45, len, factor,
-              tripKind: "outer_to_building", destPos: trip.dest.posM,
-              lane, laneVisual: lane, lcCooldown: 0, cls, rbNode: null,
+              factor: 0.85 + Math.random() * 0.2, tripKind: "outer_to_building", destPos: trip.dest.posM,
             });
             this.activeByKind.outer_to_building++;
             segCounts[orig.segId]++;
@@ -1582,14 +1481,9 @@
             const gate = this.gates[Math.floor(Math.random() * this.gates.length)];
             const trip = this._makeGateToBuildingTrip(gate, 5000, 20000);
             if (!trip || !isUncrowded(trip.route[0], 0.45)) continue;
-            const { cls, len, factor } = sampleProfile();
-            const lane = pickSpawnLane(trip.route[0], 4, len, false);
-            if (lane < 0) continue;
             this.cars.push({
-              route: trip.route, leg: 0, segId: trip.route[0], pos: 4,
-              v: this.segs[trip.route[0]].speed * 0.55, len, factor,
-              tripKind: "outer_to_building", destPos: trip.dest.posM,
-              lane, laneVisual: lane, lcCooldown: 0, cls, rbNode: null,
+              route: trip.route, leg: 0, segId: trip.route[0], pos: 0,
+              factor: 0.85 + Math.random() * 0.2, tripKind: "outer_to_building", destPos: trip.dest.posM,
             });
             this.activeByKind.outer_to_building++;
             segCounts[trip.route[0]]++;
@@ -1600,56 +1494,15 @@
         for (let t = 0; t < 10; t++) {
           const p = this.throughGatePairs[Math.floor(Math.random() * this.throughGatePairs.length)];
           if (!isUncrowded(p.path[0], 0.45)) continue;
-          const { cls, len, factor } = sampleProfile();
-          const lane = pickSpawnLane(p.path[0], 4, len, false);
-          if (lane < 0) continue;
           this.cars.push({
-            route: p.path, leg: 0, segId: p.path[0], pos: 4,
-            v: this.segs[p.path[0]].speed * 0.55, len, factor,
-            tripKind: "through_city", destPos: null,
-            lane, laneVisual: lane, lcCooldown: 0, cls, rbNode: null,
+            route: p.path, leg: 0, segId: p.path[0], pos: 0,
+            factor: 0.85 + Math.random() * 0.2, tripKind: "through_city", destPos: null,
           });
           this.activeByKind.through_city++;
           segCounts[p.path[0]]++;
           return;
         }
       }
-    }
-
-    _chooseReceivingLane(tgtId, curLane, len, isBus, finalBldg, tracksBySeg) {
-      const seg = this.segs[tgtId];
-      const nLanes = seg ? (seg.lanes || 1) : 1;
-      if (nLanes <= 1 || isBus) {
-        const tr = tracksBySeg[tgtId] ? tracksBySeg[tgtId][0] : null;
-        const tail = tr && tr.length ? tr[tr.length - 1] : null;
-        const room = tail ? (tail.pos - (tail.len || 4.5) - 2.0) : Infinity;
-        return { lane: 0, room };
-      }
-      const pref = Math.min(curLane || 0, nLanes - 1);
-      const tracks = tracksBySeg[tgtId];
-      if (finalBldg) {
-        const tr0 = tracks ? tracks[0] : null;
-        const tail0 = tr0 && tr0.length ? tr0[tr0.length - 1] : null;
-        const r0 = tail0 ? (tail0.pos - (tail0.len || 4.5) - 2.0) : Infinity;
-        if (r0 >= len + 2.0) return { lane: 0, room: r0 };
-      }
-      let bestLane = pref;
-      let bestRoom = -Infinity;
-      let bestScore = -Infinity;
-      for (let li = 0; li < nLanes; li++) {
-        const tr = tracks ? tracks[li] : null;
-        const tail = tr && tr.length ? tr[tr.length - 1] : null;
-        const room = tail ? (tail.pos - (tail.len || 4.5) - 2.0) : Infinity;
-        const hasRoom = room >= 0.5 ? 1 : 0;
-        const count = tr ? tr.length : 0;
-        const score = hasRoom * 10000 - count * 20 + Math.min(room, 120) + (li === pref ? 1 : 0);
-        if (score > bestScore) {
-          bestScore = score;
-          bestLane = li;
-          bestRoom = room;
-        }
-      }
-      return { lane: bestLane, room: bestRoom };
     }
 
     tick(dtWall) {
@@ -1665,12 +1518,10 @@
         return;
       }
       if (this.paused) return;
-      const dt = Math.min(0.35, dtWall * this.speed);
+      const dt = Math.min(0.8, dtWall * this.speed);
       this.t += dt;
       if (this.dayCycle) this.dayMinutes = (this.dayMinutes + dt / 4.0) % 1440.0;
       const wSpd = this.weather === "snow" ? 0.70 : this.weather === "rain" ? 0.85 : 1.0;
-      const wAcc = this.weather === "snow" ? 0.65 : this.weather === "rain" ? 0.84 : 1.0;
-      const wGap = this.weather === "snow" ? 1.55 : this.weather === "rain" ? 1.25 : 1.0;
       const wDem = this.weather === "rain" ? 1.18 : this.weather === "snow" ? 1.05 : 1.0;
       const dayH = (this.dayMinutes % 1440) / 60;
       const dayDem = !this.dayCycle ? 1.0 : (dayH >= 7 && dayH <= 9.5 ? 1.32 : dayH >= 16 && dayH <= 19 ? 1.38 : dayH >= 21 || dayH < 6 ? 0.45 : 0.92);
@@ -1694,450 +1545,96 @@
       const prevSegCounts = this._lastSegCounts || new Uint16Array(this.segs.length);
       this._stepControllers(dt, prevSegCounts, newRings);
 
-      // Build per-(segId, lane) sorted vehicle tracks for true non-overlapping car-following & multi-lane separation
-      const nSegs = this.segs.length;
-      const tracksBySeg = new Array(nSegs);
-      const addTrackItem = (sid, lane, item) => {
-        let segTr = tracksBySeg[sid];
-        if (!segTr) {
-          const nl = this.segs[sid].lanes || 1;
-          segTr = Array.from({ length: nl }, () => []);
-          tracksBySeg[sid] = segTr;
-        }
-        const li = Math.max(0, Math.min(segTr.length - 1, lane || 0));
-        segTr[li].push(item);
-      };
-
+      // Track priority approaches currently close to yield junctions (for realistic Cedează slowdown)
       const yieldMainBusy = new Set();
-      const rbRings = new Map();
-      const addRbItem = (rbNode, rbLane, item) => {
-        const key = `${rbNode}:${rbLane}`;
-        let arr = rbRings.get(key);
-        if (!arr) { arr = []; rbRings.set(key, arr); }
-        arr.push(item);
-      };
-
-      const lcStep = dt / 1.1;
       for (let i = 0; i < this.cars.length; i++) {
         const c = this.cars[i];
-        if (c.rbNode != null) {
-          addRbItem(c.rbNode, c.rbLane || 0, c);
-          continue;
-        }
-        if (c.lane == null) c.lane = 0;
-        if (c.laneVisual == null) c.laneVisual = c.lane;
-        const diff = c.lane - c.laneVisual;
-        c.laneVisual = Math.abs(diff) <= lcStep ? c.lane : (c.laneVisual + Math.sign(diff) * lcStep);
-        if (c.lcCooldown > 0) c.lcCooldown = Math.max(0, c.lcCooldown - dt);
-        if (c.len == null) c.len = this._vehLen(c);
-        if (c.v == null) c.v = this.segs[c.segId].speed * 0.6;
+        if (c.rbNode != null) continue;
         const s = this.segs[c.segId];
         const minors = this.yieldMinorApproaches.get(s.v);
         if (minors && !minors.has(s.id) && s.length - c.pos <= 36) yieldMainBusy.add(s.v);
-        addTrackItem(c.segId, c.lane, c);
       }
-
       for (let i = 0; i < this.buses.length; i++) {
         const b = this.buses[i];
-        if (b.status !== "DRIVING") continue;
-        if (b.rbNode != null) {
-          addRbItem(b.rbNode, 0, b);
-          continue;
-        }
-        const sid = b.route.edges[b.leg];
-        b.segId = sid;
-        b.lane = 0;
-        b.laneVisual = 0;
-        if (b.len == null) b.len = this._vehLen(b);
-        if (b.inBay) continue; // recessed bus bay pulls off Bandă 1 cleanly
-        const s = this.segs[sid];
+        if (b.status !== "DRIVING" || b.rbNode != null) continue;
+        const s = this.segs[b.route.edges[b.leg]];
         const minors = this.yieldMinorApproaches.get(s.v);
         if (minors && !minors.has(s.id) && s.length - b.pos <= 38) yieldMainBusy.add(s.v);
-        addTrackItem(sid, 0, b);
       }
 
-      for (const fb of (this.frictionBlockers || [])) {
-        addTrackItem(fb.segId, 0, fb);
-      }
-
-      // Sort each active lane track descending by `pos` (front vehicle at index 0)
-      for (let sid = 0; sid < nSegs; sid++) {
-        const segTr = tracksBySeg[sid];
-        if (!segTr) continue;
-        for (let li = 0; li < segTr.length; li++) {
-          if (segTr[li].length > 1) segTr[li].sort((a, b) => b.pos - a.pos);
+      // Move OD-routed multi-lane vehicles & circular Romanian roundabouts
+      const segCounts = new Uint16Array(this.segs.length);
+      const survivors = [];
+      for (let i = 0; i < this.cars.length; i++) {
+        const c = this.cars[i];
+        if (c.rbNode != null) {
+          const rb = this.roundaboutByNode.get(c.rbNode);
+          const rEff = this._rbLaneRadius(rb, c.rbLane || 0);
+          const darc = (7.2 * wSpd * dt) / rEff;
+          c.rbAngle = (c.rbAngle + darc) % (Math.PI * 2);
+          c.rbRemaining -= darc;
+          if (c.rbLane === 1 && c.rbRemaining <= 1.25) c.rbLane = 0; // HG 130/2023 outer lane exit
+          if (c.rbRemaining <= 0) {
+            c.rbNode = null;
+            c.leg += 1;
+            c.segId = c.route[c.leg];
+            c.pos = 0;
+            c.lane = Math.min(c.lane || 0, (this.segs[c.segId].lanes || 1) - 1);
+          }
+          segCounts[c.segId]++;
+          survivors.push(c);
+          continue;
         }
-      }
-
-      // Fast MOBIL-style multi-lane lane-changing pass on 2- and 3-lane boulevards
-      const aheadGap = (arr, pos) => {
-        let best = Infinity;
-        for (let k = 0; k < arr.length; k++) {
-          const u = arr[k];
-          if (u.pos >= pos) {
-            const g = u.pos - (u.len || 4.5) - pos;
-            if (g < best) best = g;
-          }
-        }
-        return best;
-      };
-      const laneSafe = (arr, pos, len) => {
-        for (let k = 0; k < arr.length; k++) {
-          const u = arr[k];
-          if (u.pos >= pos) {
-            if (u.pos - (u.len || 4.5) - pos < 6.5) return false;
-          } else {
-            if (pos - len - u.pos < 7.5) return false;
-          }
-        }
-        return true;
-      };
-      for (let sid = 0; sid < nSegs; sid++) {
-        const segTr = tracksBySeg[sid];
-        if (!segTr || segTr.length < 2) continue;
-        const seg = this.segs[sid];
-        for (let li = 0; li < segTr.length; li++) {
-          const tr = segTr[li];
-          for (let idx = tr.length - 1; idx >= 0; idx--) {
-            const v = tr[idx];
-            if (v.isBlocker || v.line || v.lcCooldown > 0) continue; // only cars change lanes
-            if (v.pos < 10 || seg.stopPos - v.pos < 12) continue;
-            const ahead = idx > 0 ? tr[idx - 1] : null;
-            if (!ahead) continue;
-            const hw = ahead.pos - (ahead.len || 4.5) - v.pos;
-            const aheadSlow = ahead.isBlocker || (ahead.stopDwell > 0) || (hw < 28 && (ahead.v ?? ahead.speed ?? 0) < seg.speed * 0.72);
-            if (!aheadSlow) continue;
-            let bestAdj = -1;
-            let bestGain = ahead.isBlocker ? 4 : 11;
-            for (const cand of [li + 1, li - 1]) {
-              if (cand < 0 || cand >= segTr.length) continue;
-              const g = aheadGap(segTr[cand], v.pos) - hw;
-              if (g > bestGain && laneSafe(segTr[cand], v.pos, v.len || 4.5)) {
-                bestGain = g;
-                bestAdj = cand;
-              }
-            }
-            if (bestAdj >= 0) {
-              tr.splice(idx, 1);
-              v.lane = bestAdj;
-              v.lcCooldown = 3.0;
-              segTr[bestAdj].push(v);
-              segTr[bestAdj].sort((a, b) => b.pos - a.pos);
-            }
-          }
-        }
-      }
-
-      // Compute tight per-lane car-following movement for every car & bus on every lane track
-      const minGap = 2.0 * wGap;
-      const accel = 2.0 * wAcc;
-      const comfort = 3.0 * wAcc;
-      const hardBrake = 6.0;
-      const segCounts = new Uint16Array(nSegs);
-      const removedCars = new Set();
-
-      // Advance circulating roundabout vehicles with circular gap spacing (no stacking!)
-      for (const [, ringArr] of rbRings.entries()) {
-        for (let vi = 0; vi < ringArr.length; vi++) {
-          const v = ringArr[vi];
-          const rb = this.roundaboutByNode.get(v.rbNode);
-          const rEff = this._rbLaneRadius(rb, v.rbLane || 0);
-          let aheadDist = Infinity;
-          for (let ui = 0; ui < ringArr.length; ui++) {
-            if (ui === vi) continue;
-            const u = ringArr[ui];
-            const da = (((u.rbAngle - v.rbAngle) % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
-            if (da < 1e-4 || da > Math.PI * 2 - 1e-4) {
-              if (ui < vi) aheadDist = 0;
-              continue;
-            }
-            if (da > Math.PI * 1.4) continue;
-            const dM = da * rEff - (u.len || 4.5) - minGap;
-            if (dM < aheadDist) aheadDist = Math.max(0, dM);
-          }
-          const baseV = v.line ? (6.8 * wSpd) : (7.2 * wSpd);
-          const vDes = aheadDist === Infinity ? baseV : Math.min(baseV, Math.sqrt(2 * comfort * Math.max(0, aheadDist)));
-          const curV = v.line ? (v.speed ?? baseV) : (v.v ?? baseV);
-          const nextV = Math.max(0, curV + Math.max(-hardBrake * dt, Math.min(accel * dt, vDes - curV)));
-          if (v.line) v.speed = nextV; else v.v = nextV;
-          const darc = (nextV * dt) / rEff;
-          v.rbAngle = (v.rbAngle + darc) % (Math.PI * 2);
-          v.rbRemaining -= darc;
-          if (!v.line && v.rbLane === 1 && v.rbRemaining <= 1.25) v.rbLane = 0;
-          if (v.line) {
-            const rSeg = this.segs[v.route.edges[v.leg]];
-            const slowFrac = 1.0 - Math.min(1.0, nextV / Math.max(1, rSeg.speed));
-            this.busElapsedSum += dt;
-            this.busDelaySum += dt * slowFrac;
-          }
-          if (v.rbRemaining <= 0) {
-            const nextId = v.line
-              ? v.route.edges[(v.leg + 1) % v.route.edges.length]
-              : v.route[v.leg + 1];
-            const recv = this._chooseReceivingLane(nextId, v.lane || 0, v.len || 4.5, !!v.line, false, tracksBySeg);
-            if (recv.room >= -1.0 || (v.rbWait || 0) > 2.2) {
-              v.rbNode = null;
-              v.rbWait = 0;
-              if (v.line) {
-                v.leg = (v.leg + 1) % v.route.edges.length;
-                v.segId = nextId;
-                v.pos = 0;
-                v.lastStopId = -1;
-              } else {
-                v.leg += 1;
-                v.segId = nextId;
-                v.pos = 0;
-                v.lane = recv.lane;
-                v.laneVisual = recv.lane;
-              }
-            } else {
-              v.rbRemaining = 0;
-              if (v.line) v.speed = 0; else v.v = 0;
-              v.rbWait = (v.rbWait || 0) + dt;
-            }
-          }
-        }
-      }
-
-      // Step every lane track front-to-back with strict non-overlapping car-following
-      const tickSeq = (this._tickSeq = (this._tickSeq || 0) + 1);
-      let slowSum = 0;
-      let slowN = 0;
-      for (let sid = 0; sid < nSegs; sid++) {
-        const segTr = tracksBySeg[sid];
-        if (!segTr) continue;
-        const seg = this.segs[sid];
-        const sigSt = this._signalState(sid);
-        const railClosed = this.activeRails.has(sid);
-        const railPos = seg.length * 0.5;
+        const seg = this.segs[c.segId];
+        const sigSt = this._signalState(seg.id);
+        const railClosed = this.activeRails.has(seg.id) && c.pos < seg.length * 0.5 && seg.length * 0.5 - c.pos < 14;
         const minorsAtEnd = this.yieldMinorApproaches.get(seg.v);
+        const mustYield = c.cls !== 3 && minorsAtEnd && minorsAtEnd.has(seg.id) && yieldMainBusy.has(seg.v) && c.pos < seg.stopPos && seg.stopPos - c.pos < 14;
+        let yieldBlocked = false;
+        if (mustYield) {
+          c.yieldWait = (c.yieldWait || 0) + dt;
+          if (c.yieldWait < 3.5) yieldBlocked = true;
+        } else {
+          c.yieldWait = 0;
+        }
+        const blocked = (c.cls !== 3 && sigSt === "R" && c.pos < seg.stopPos && seg.stopPos - c.pos < 18) || railClosed || yieldBlocked;
+        const gradePen = seg.gradePct > 1.5 ? (c.cls === 2 ? 0.72 : 0.92) : 1.0;
+        if (!blocked) c.pos += seg.speed * c.factor * wSpd * gradePen * dt * 0.78;
+
+        if (c.destPos != null && c.leg === c.route.length - 1 && c.pos >= c.destPos) {
+          if (c.tripKind !== "emergency") this.activeByKind[c.tripKind] = Math.max(0, (this.activeByKind[c.tripKind] || 0) - 1);
+          continue;
+        }
         const rbAtEnd = this.roundaboutByNode.get(seg.v);
         const crossAt = rbAtEnd ? Math.min(seg.length, seg.stopPos + 1.5) : seg.length;
-        const segStops = this.busStopsBySeg.get(sid);
-
-        for (let li = 0; li < segTr.length; li++) {
-          const tr = segTr[li];
-          let prev = null;
-          for (let idx = 0; idx < tr.length; idx++) {
-            const v = tr[idx];
-            if (v.isBlocker) {
-              prev = v;
-              continue;
-            }
-            if (v._tickSeq === tickSeq) {
-              prev = v;
-              continue;
-            }
-            v._tickSeq = tickSeq;
-            const isBus = !!v.line;
-            if (isBus && v.stopDwell > 0) {
-              v.stopDwell = Math.max(0, v.stopDwell - dt);
-              v.speed = 0;
-              if (v.stopDwell <= 0) v.inBay = false;
-              prev = v;
-              continue;
-            }
-            const len = v.len || (isBus ? 11.4 : 4.5);
-            let limit = prev ? (prev.pos - (prev.len || 4.5) - minGap) : Infinity;
-
-            // Scheduled CTP bus stop approach
-            let nextStop = null;
-            if (isBus && segStops) {
-              for (let si = 0; si < segStops.length; si++) {
-                const st = segStops[si];
-                if (st.id !== v.lastStopId && st.posM >= v.pos - 1.5) {
-                  nextStop = st;
-                  if (st.posM < limit) limit = st.posM;
-                  break;
-                }
-              }
-            }
-
-            // Closed CFR railway barrier
-            if (railClosed && v.pos < railPos - 0.5) {
-              if (railPos - 1.5 < limit) limit = railPos - 1.5;
-            }
-
-            // Signal / Yield stop line (only front vehicle before stop line holds here; followers queue cleanly via `prev`!)
-            const isAmb = !isBus && v.cls === 3;
-            if (!isAmb && v.pos < seg.stopPos && (!prev || prev.pos >= seg.stopPos)) {
-              const curV = isBus ? (v.speed || 0) : (v.v || 0);
-              const stopRed = sigSt === "R" || (sigSt === "Y" && (curV * curV) / (2 * hardBrake) <= seg.stopPos - v.pos);
-              let yieldHold = false;
-              if (!stopRed && minorsAtEnd && minorsAtEnd.has(sid) && yieldMainBusy.has(seg.v)) {
-                v.yieldWait = (v.yieldWait || 0) + dt;
-                if (v.yieldWait < 3.5) yieldHold = true;
-              } else {
-                v.yieldWait = 0;
-              }
-              if (stopRed || yieldHold) {
-                if (seg.stopPos - 0.4 < limit) limit = seg.stopPos - 0.4;
-              }
-            }
-
-            // Free-flow speed & smooth kinematic acceleration/braking
-            const gradePen = seg.gradePct > 1.5 ? (isBus ? 0.90 : (v.cls === 2 ? 0.72 : 0.92)) : 1.0;
-            const vFree = seg.speed * (isBus ? 0.90 : (v.factor || 0.95)) * wSpd * gradePen;
-            const room = Math.max(0, limit - v.pos);
-            const vDes = room === Infinity ? vFree : Math.min(vFree, Math.sqrt(2 * comfort * room));
-            const curV = isBus ? (v.speed || 0) : (v.v || 0);
-            let nextV = Math.max(0, curV + Math.max(-hardBrake * dt, Math.min(accel * dt, vDes - curV)));
-            const oldPos = v.pos;
-            let newPos = oldPos + nextV * dt;
-            if (newPos > limit) {
-              newPos = Math.max(oldPos, limit);
-              nextV = dt > 1e-5 ? (newPos - oldPos) / dt : 0;
-            }
-            v.pos = newPos;
-            if (isBus) {
-              v.speed = nextV;
-              const slowFrac = 1.0 - Math.min(1.0, nextV / Math.max(1, seg.speed));
-              this.busElapsedSum += dt;
-              this.busDelaySum += dt * slowFrac;
-              slowSum += slowFrac;
-              slowN += 1;
-              if (oldPos < seg.stopPos && newPos >= seg.stopPos) {
-                v.lastCrossed = { segId: sid, leg: v.leg, t: this.t };
-              }
-              if (nextStop && nextStop.posM - newPos <= 1.2 && nextV <= 2.2) {
-                v.pos = nextStop.posM;
-                v.lastStopId = nextStop.id;
-                v.stopDwell = (7 + Math.random() * 8) * nextStop.demand;
-                v.inBay = nextStop.hasBay;
-                v.speed = 0;
-                if (!v.inBay) prev = v;
-                continue;
-              }
+        if (c.pos >= crossAt) {
+          if (c.leg + 1 < c.route.length) {
+            const nextId = c.route[c.leg + 1];
+            if (rbAtEnd) {
+              const aIn = rbAtEnd.armAngles.get(seg.id) || 0;
+              const aOut = rbAtEnd.armAngles.get(nextId) || (aIn + 1.5);
+              let arc = ((aOut - aIn) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
+              if (arc < 0.45) arc += Math.PI * 2;
+              c.rbNode = rbAtEnd.node;
+              c.rbAngle = aIn;
+              c.rbRemaining = arc;
+              c.rbLane = (rbAtEnd.ringLanes >= 2 && arc >= 2.85) ? 1 : 0;
+              c.pos = seg.length;
             } else {
-              v.v = nextV;
-              if (v.destPos != null && v.leg === v.route.length - 1 && newPos >= v.destPos) {
-                if (v.tripKind !== "emergency") this.activeByKind[v.tripKind] = Math.max(0, (this.activeByKind[v.tripKind] || 0) - 1);
-                removedCars.add(v);
-                continue;
-              }
+              c.pos -= seg.length;
+              c.leg += 1;
+              c.segId = nextId;
+              c.lane = Math.min(c.lane || 0, (this.segs[nextId].lanes || 1) - 1);
             }
-
-            // Segment handoff or roundabout entry
-            if (v.pos >= crossAt) {
-              if (isBus) {
-                const finishedLeg = v.leg;
-                const nextLeg = (v.leg + 1) % v.route.edges.length;
-                const atTerminus = nextLeg === 0 || (v.route.turnaround_leg > 0 && finishedLeg === v.route.turnaround_leg);
-                const rb = !atTerminus ? rbAtEnd : null;
-                const nextId = v.route.edges[nextLeg];
-                if (rb) {
-                  const aIn = rb.armAngles.get(sid) || 0;
-                  const aOut = rb.armAngles.get(nextId) || (aIn + 1.5);
-                  let arc = ((aOut - aIn) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
-                  if (arc < 0.45) arc += Math.PI * 2;
-                  v.rbNode = rb.node;
-                  v.rbAngle = aIn;
-                  v.rbRemaining = arc;
-                  v.rbLane = 0;
-                  v.pos = seg.length;
-                  continue;
-                }
-                const recv = this._chooseReceivingLane(nextId, 0, len, true, false, tracksBySeg);
-                if (!atTerminus && recv.room < 0.0) {
-                  v.pos = Math.max(oldPos, crossAt - 0.15);
-                  v.speed = 0;
-                  prev = v;
-                  continue;
-                }
-                v.leg = nextLeg;
-                v.segId = nextId;
-                v.pos = 0;
-                v.lastStopId = -1;
-                if (atTerminus) {
-                  v.stopsSinceBreak += 1;
-                  if (v.stopsSinceBreak >= v.nextBreakAt) {
-                    v.status = "DRIVER_BREAK";
-                    v.restRemaining = 900 + Math.random() * 900;
-                    v.stopsSinceBreak = 0;
-                    v.nextBreakAt = 3 + Math.floor(Math.random() * 3);
-                  } else {
-                    v.status = "LAYOVER";
-                    v.restRemaining = 300 + Math.random() * 600;
-                  }
-                } else {
-                  addTrackItem(nextId, 0, v);
-                }
-                continue;
-              } else {
-                if (v.leg + 1 < v.route.length) {
-                  const nextId = v.route[v.leg + 1];
-                  if (rbAtEnd) {
-                    const aIn = rbAtEnd.armAngles.get(sid) || 0;
-                    const aOut = rbAtEnd.armAngles.get(nextId) || (aIn + 1.5);
-                    let arc = ((aOut - aIn) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
-                    if (arc < 0.45) arc += Math.PI * 2;
-                    v.rbNode = rbAtEnd.node;
-                    v.rbAngle = aIn;
-                    v.rbRemaining = arc;
-                    v.rbLane = (rbAtEnd.ringLanes >= 2 && arc >= 2.85) ? 1 : 0;
-                    v.pos = seg.length;
-                    continue;
-                  }
-                  const finalBldg = v.destPos != null && (v.leg + 1 === v.route.length - 1);
-                  const recv = this._chooseReceivingLane(nextId, v.lane, len, false, finalBldg, tracksBySeg);
-                  if (recv.room < 0.0) {
-                    // Receiving street is backed up right to the intersection: queue cleanly here instead of overlapping!
-                    v.pos = Math.max(oldPos, crossAt - 0.15);
-                    v.v = 0;
-                    prev = v;
-                    continue;
-                  }
-                  v.pos = Math.max(0, v.pos - seg.length);
-                  v.leg += 1;
-                  v.segId = nextId;
-                  v.lane = recv.lane;
-                  v.laneVisual = recv.lane;
-                  addTrackItem(nextId, recv.lane, v);
-                  continue;
-                } else {
-                  if (v.tripKind !== "emergency") this.activeByKind[v.tripKind] = Math.max(0, (this.activeByKind[v.tripKind] || 0) - 1);
-                  removedCars.add(v);
-                  continue;
-                }
-              }
-            }
-            prev = v;
+          } else {
+            if (c.tripKind !== "emergency") this.activeByKind[c.tripKind] = Math.max(0, (this.activeByKind[c.tripKind] || 0) - 1);
+            continue;
           }
         }
+        segCounts[c.segId]++;
+        survivors.push(c);
       }
-
-      // Handle buses currently resting at terminus or parked in recessed bays
-      for (let i = 0; i < this.buses.length; i++) {
-        const b = this.buses[i];
-        if (b.status !== "DRIVING") {
-          b.restRemaining = Math.max(0, b.restRemaining - dt);
-          if (b.restRemaining <= 0) {
-            const sid = b.route.edges[b.leg];
-            if (this._isLanePosFree(sid, 0, 2, b.len || 11.4)) {
-              b.status = "DRIVING";
-              b.segId = sid;
-              b.pos = 0;
-              b.lastStopId = -1;
-            }
-          }
-        } else if (b.inBay && b.stopDwell > 0) {
-          b.stopDwell = Math.max(0, b.stopDwell - dt);
-          b.speed = 0;
-          if (b.stopDwell <= 0) {
-            const sid = b.route.edges[b.leg];
-            if (this._isLanePosFree(sid, 0, b.pos, b.len || 11.4)) {
-              b.inBay = false;
-            } else {
-              b.stopDwell = 0.25; // wait briefly for Bandă 1 gap before merging out of bay
-            }
-          }
-        }
-      }
-
-      if (removedCars.size > 0) {
-        this.cars = this.cars.filter((c) => !removedCars.has(c));
-      }
-      for (let i = 0; i < this.cars.length; i++) segCounts[this.cars[i].segId]++;
+      this.cars = survivors;
 
       // Wave 2 closed-loop spawning from uncrowded residential streets & gates
       const targetCars = Math.round(1500 * (this.trafficPercent / 100) * dayDem * wDem);
@@ -2149,6 +1646,116 @@
 
       this._lastSegCounts = segCounts;
 
+      // Move buses with honest physics (same cruise law in Fixed & Adaptive), real signal holds, and live delay tracking
+      let slowSum = 0;
+      let slowN = 0;
+      for (const b of this.buses) {
+        if (b.status !== "DRIVING") {
+          b.restRemaining = Math.max(0, b.restRemaining - dt);
+          if (b.restRemaining <= 0) { b.status = "DRIVING"; b.pos = 0; b.lastStopId = -1; }
+          continue;
+        }
+        if (b.stopDwell > 0) {
+          b.stopDwell = Math.max(0, b.stopDwell - dt);
+          b.speed = 0;
+          if (b.stopDwell <= 0) b.inBay = false;
+          continue;
+        }
+        if (b.rbNode != null) {
+          const rb = this.roundaboutByNode.get(b.rbNode);
+          const rEff = this._rbLaneRadius(rb, 0);
+          const darc = (6.8 * wSpd * dt) / rEff;
+          b.rbAngle = (b.rbAngle + darc) % (Math.PI * 2);
+          b.rbRemaining -= darc;
+          b.speed = 6.8 * wSpd;
+          const rSeg = this.segs[b.route.edges[b.leg]];
+          const slowFrac = 1.0 - Math.min(1.0, b.speed / Math.max(1, rSeg.speed));
+          this.busElapsedSum += dt;
+          this.busDelaySum += dt * slowFrac;
+          slowSum += slowFrac;
+          slowN += 1;
+          if (b.rbRemaining <= 0) {
+            b.rbNode = null;
+            b.leg = (b.leg + 1) % b.route.edges.length;
+            b.pos = 0;
+            b.lastStopId = -1;
+          }
+          continue;
+        }
+        const seg = this.segs[b.route.edges[b.leg]];
+        const sigSt = this._signalState(seg.id);
+        const dens = Math.min(1.0, (segCounts[seg.id] * 6.5) / Math.max(1, seg.length * (seg.lanes || 1)));
+        const densFactor = Math.max(0.45, 1.0 - 0.30 * dens);
+        const gradePen = seg.gradePct > 1.5 ? 0.92 : 1.0;
+        const redQueuePen = (sigSt === "R" && b.pos < seg.stopPos && seg.stopPos - b.pos < 65 && segCounts[seg.id] >= 2)
+          ? Math.max(0.45, 1.0 - 0.12 * Math.min(4, segCounts[seg.id]))
+          : 1.0;
+        let speed = seg.speed * wSpd * gradePen * densFactor * redQueuePen * 0.90;
+        const railClosed = this.activeRails.has(seg.id) && b.pos < seg.length * 0.5 && seg.length * 0.5 - b.pos < 14;
+        const stopRed = (sigSt === "R" || (sigSt === "Y" && seg.stopPos - b.pos > 6)) && b.pos < seg.stopPos && seg.stopPos - b.pos < 20;
+        if (stopRed || railClosed) speed = 0;
+        b.speed = speed;
+        const slowFrac = 1.0 - Math.min(1.0, speed / Math.max(1, seg.speed));
+        this.busElapsedSum += dt;
+        this.busDelaySum += dt * slowFrac;
+        slowSum += slowFrac;
+        slowN += 1;
+        const oldPos = b.pos;
+        b.pos += speed * dt;
+        if (oldPos < seg.stopPos && b.pos >= seg.stopPos) {
+          b.lastCrossed = { segId: seg.id, leg: b.leg, t: this.t };
+        }
+        // Check real CTP bus stops along this segment
+        const stops = this.busStopsBySeg.get(seg.id);
+        if (stops) {
+          for (const st of stops) {
+            if (st.id !== b.lastStopId && oldPos <= st.posM && b.pos >= st.posM) {
+              b.pos = st.posM;
+              b.lastStopId = st.id;
+              b.stopDwell = (7 + Math.random() * 8) * st.demand;
+              b.inBay = st.hasBay;
+              b.speed = 0;
+              break;
+            }
+          }
+        }
+        const rbBusEnd = this.roundaboutByNode.get(seg.v);
+        const busCrossAt = rbBusEnd ? Math.min(seg.length, seg.stopPos + 1.5) : seg.length;
+        if (b.pos >= busCrossAt) {
+          const finishedLeg = b.leg;
+          const nextLeg = (b.leg + 1) % b.route.edges.length;
+          const atTerminus = nextLeg === 0 || (b.route.turnaround_leg > 0 && finishedLeg === b.route.turnaround_leg);
+          const rb = !atTerminus ? rbBusEnd : null;
+          if (rb) {
+            const nextId = b.route.edges[nextLeg];
+            const aIn = rb.armAngles.get(seg.id) || 0;
+            const aOut = rb.armAngles.get(nextId) || (aIn + 1.5);
+            let arc = ((aOut - aIn) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
+            if (arc < 0.45) arc += Math.PI * 2;
+            b.rbNode = rb.node;
+            b.rbAngle = aIn;
+            b.rbRemaining = arc;
+            b.rbLane = 0;
+            b.pos = seg.length;
+          } else {
+            b.leg = nextLeg;
+            b.pos = 0;
+            b.lastStopId = -1;
+            if (atTerminus) {
+              b.stopsSinceBreak += 1;
+              if (b.stopsSinceBreak >= b.nextBreakAt) {
+                b.status = "DRIVER_BREAK";
+                b.restRemaining = 900 + Math.random() * 900;
+                b.stopsSinceBreak = 0;
+                b.nextBreakAt = 3 + Math.floor(Math.random() * 3);
+              } else {
+                b.status = "LAYOVER";
+                b.restRemaining = 300 + Math.random() * 600;
+              }
+            }
+          }
+        }
+      }
       if (slowN > 0) {
         const meanSlow = slowSum / slowN;
         if (!this._delayEmaInit) {
@@ -2271,14 +1878,7 @@
       const delaySaved = this.adaptive ? Math.max(0, baseDelay - delayRatio) : 0.0;
       const cars = this.cars.map((c) => {
         const [x, y, dx, dy] = this._vehicleXY(c);
-        const seg = this.segs[c.segId];
-        const latOff = this._vehicleLatOff(c);
-        const spdRatio = seg ? Math.min(1, (c.v ?? seg.speed * 0.7) / Math.max(1, seg.speed)) : 0.8;
-        return [
-          Math.round(x * 10) / 10, Math.round(y * 10) / 10,
-          Math.round(dx * 100) / 100, Math.round(dy * 100) / 100,
-          c.cls || 0, Math.round(latOff * 100) / 100, Math.round(spdRatio * 100) / 100,
-        ];
+        return [Math.round(x * 10) / 10, Math.round(y * 10) / 10, Math.round(dx * 100) / 100, Math.round(dy * 100) / 100, c.cls || 0];
       });
       const artLines = new Set(["19", "28", "30", "42", "43", "46", "52"]);
       const miniLines = new Set(["18", "23b", "48", "49", "53", "104", "204", "501b", "503b", "603", "802b"]);
@@ -2287,14 +1887,8 @@
         b.segId = seg.id;
         b.lane = 0;
         const [x, y, dx, dy] = this._vehicleXY(b);
-        const latOff = this._vehicleLatOff(b);
-        const bLen = artLines.has(b.line) ? 12.6 : (miniLines.has(b.line) ? 8.4 : 11.0);
-        return [
-          b.id, b.line, Math.round(x * 10) / 10, Math.round(y * 10) / 10,
-          Math.round(dx * 100) / 100, Math.round(dy * 100) / 100,
-          Math.min(1, b.speed / seg.speed), b.status, Math.round((b.restRemaining / 60) * 10) / 10,
-          b.stopDwell > 0 ? 1 : 0, bLen, Math.round(latOff * 100) / 100,
-        ];
+        const bLen = artLines.has(b.line) ? 15.8 : (miniLines.has(b.line) ? 8.4 : 11.8);
+        return [b.id, b.line, Math.round(x * 10) / 10, Math.round(y * 10) / 10, Math.round(dx * 100) / 100, Math.round(dy * 100) / 100, Math.min(1, b.speed / seg.speed), b.status, Math.round((b.restRemaining / 60) * 10) / 10, b.stopDwell > 0 ? 1 : 0, bLen];
       });
       const hh = Math.floor(this.dayMinutes / 60) % 24;
       const mm = Math.floor(this.dayMinutes % 60);

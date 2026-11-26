@@ -506,8 +506,8 @@
       }
     }
 
-    // 1.2. Crisp Center Medians & Dashed Multi-Lane Markings (exag-aligned to exact visual lanes!)
-    if (sc >= 0.18) {
+    // 1.2. Crisp Center Medians & Dashed Multi-Lane Markings (zoomed in)
+    if (sc >= 0.24) {
       for (const road of state.map.roads) {
         const lanesDir = road.lanes || 1;
         if (lanesDir < 2 && road.oneway) continue;
@@ -520,22 +520,21 @@
           });
           ctx.setLineDash(lanesDir >= 2 ? [] : [4, 5]);
           ctx.strokeStyle = isDark
-            ? (lanesDir >= 2 ? "rgba(134, 239, 172, 0.30)" : "rgba(134, 239, 172, 0.18)")
-            : (lanesDir >= 2 ? "rgba(20, 83, 45, 0.24)" : "rgba(20, 83, 45, 0.14)");
+            ? (lanesDir >= 2 ? "rgba(134, 239, 172, 0.28)" : "rgba(134, 239, 172, 0.16)")
+            : (lanesDir >= 2 ? "rgba(20, 83, 45, 0.22)" : "rgba(20, 83, 45, 0.12)");
           ctx.lineWidth = lanesDir >= 2 ? Math.max(1.0, 1.3 * sc) : 0.85;
           ctx.stroke();
           ctx.setLineDash([]);
         }
-        // Dashed band dividers inside 2-lane and 3-lane directions, scaled by `exag` to match widened road & lanes
-        if (lanesDir >= 2 && sc >= 0.20 && road.pts.length >= 2) {
-          ctx.setLineDash([4.5, 5.5]);
-          ctx.strokeStyle = isDark ? "rgba(148, 196, 172, 0.30)" : "rgba(75, 105, 88, 0.30)";
-          ctx.lineWidth = sc >= 0.45 ? 0.95 : 0.75;
+        // Subtle dashed band dividers inside 2-lane and 3-lane directions
+        if (lanesDir >= 2 && sc >= 0.32 && road.pts.length >= 2) {
+          ctx.setLineDash([5, 6]);
+          ctx.strokeStyle = isDark ? "rgba(148, 196, 172, 0.26)" : "rgba(100, 125, 110, 0.28)";
+          ctx.lineWidth = 0.85;
           const offsets = road.oneway
             ? (lanesDir === 2 ? [0] : [-1.55, 1.55])
             : (lanesDir === 2 ? [3.45, -3.45] : [3.45, 6.55, -3.45, -6.55]);
           for (const off of offsets) {
-            const scaledOff = off * exag;
             ctx.beginPath();
             for (let i = 0; i < road.pts.length; i++) {
               const p = road.pts[i];
@@ -544,7 +543,7 @@
               let dx = q[0] - prev[0], dy = q[1] - prev[1];
               const mag = Math.hypot(dx, dy) || 1;
               dx /= mag; dy /= mag;
-              const [sx, sy] = toScreen(p[0] + dy * scaledOff, p[1] - dx * scaledOff);
+              const [sx, sy] = toScreen(p[0] + dy * off, p[1] - dx * off);
               if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
             }
             ctx.stroke();
@@ -1022,74 +1021,45 @@
         }
       }
 
-      // 7. Visual Vehicles by Class (lane-aligned with `exag`, zero-overlap true-scale sizing, speed-tinted for traffic visibility!)
-      const lanePx = 3.1 * exag * sc;
-      const exagShift = exag - 1.0;
-      const drawOutline = sc >= 0.52;
-      const outlineCol = isDark ? "rgba(5, 18, 13, 0.82)" : "rgba(15, 42, 31, 0.42)";
+      // 7. Visual Vehicles by Class (0=car, 1=van, 2=truck, 3=ambulance — physics always active!)
       if (state.showCars && f.cars && f.cars.length) {
         const blink = Math.floor(performance.now() / 160) % 2 === 0;
-        const minLen = sc < 0.24 ? 2.1 : Math.min(2.2, 5.2 * sc);
-        const wCapCar = Math.max(1.25, Math.min(lanePx * 0.62, 2.05 * sc * Math.min(exag, 1.35)));
-        const wCapVan = Math.max(1.38, Math.min(lanePx * 0.68, 2.25 * sc * Math.min(exag, 1.35)));
-        const wCapTruck = Math.max(1.55, Math.min(lanePx * 0.74, 2.50 * sc * Math.min(exag, 1.35)));
         for (const c of f.cars) {
-          const [x, y, dx, dy, cls = 0, latOff = 0, spdRatio = 0.85] = c;
-          const shift = latOff * exagShift;
-          const [sx, sy] = toScreen(x + dy * shift, y - dx * shift);
+          const [x, y, dx, dy, cls = 0] = c;
+          const [sx, sy] = toScreen(x, y);
           if (sx < -18 || sx > W + 18 || sy < -18 || sy > H + 18) continue;
           ctx.save();
           ctx.translate(sx, sy);
           ctx.rotate(Math.atan2(-dy, dx));
           if (cls === 3) {
             // Emergency Ambulance: Snow White + red/blue flashing beacon halo!
-            const al = Math.max(5.5, 6.2 * sc), aw = Math.max(2.6, Math.min(lanePx * 0.82, 2.5 * sc * Math.min(exag, 1.35)));
+            const al = Math.max(7.5, 6.4 * sc), aw = Math.max(3.8, 2.7 * sc);
             ctx.beginPath();
-            ctx.arc(0, 0, Math.max(6.5, 8.0 * sc), 0, Math.PI * 2);
+            ctx.arc(0, 0, Math.max(7.5, 8.5 * sc), 0, Math.PI * 2);
             ctx.fillStyle = blink ? "rgba(239, 68, 68, 0.25)" : "rgba(59, 130, 246, 0.25)";
             ctx.fill();
             ctx.fillStyle = "#ffffff";
             ctx.strokeStyle = "#dc2626";
-            ctx.lineWidth = 1.2;
+            ctx.lineWidth = 1.4;
             ctx.fillRect(-al / 2, -aw / 2, al, aw);
             ctx.strokeRect(-al / 2, -aw / 2, al, aw);
             ctx.fillStyle = blink ? "#ef4444" : "#2563eb";
-            ctx.fillRect(-1.2, -aw * 0.35, 2.4, aw * 0.7);
+            ctx.fillRect(-1.5, -aw * 0.35, 3, aw * 0.7);
+          } else if (cls === 2) {
+            // Heavy Truck / TIR
+            const tl = Math.max(8.5, 10.6 * sc), tw = Math.max(3.2, 2.7 * sc);
+            ctx.fillStyle = isDark ? "#94b8a8" : "#627b6e";
+            ctx.fillRect(-tl / 2, -tw / 2, tl, tw);
+          } else if (cls === 1) {
+            // Delivery Van / SUV
+            const vl = Math.max(5.5, 5.8 * sc), vw = Math.max(2.8, 2.4 * sc);
+            ctx.fillStyle = isDark ? "#a9c8ba" : "#7e998b";
+            ctx.fillRect(-vl / 2, -vw / 2, vl, vw);
           } else {
-            // Traffic-speed color coding so real queues & jams stand out immediately
-            let fill;
-            if (spdRatio < 0.22) {
-              fill = isDark ? "#f87171" : "#dc2626"; // stopped / queued in traffic
-            } else if (spdRatio < 0.55) {
-              fill = isDark ? "#fbbf24" : "#d97706"; // slow / congested flow
-            } else if (cls === 2) {
-              fill = isDark ? "#86ad9c" : "#4f6b5d"; // free-flowing truck
-            } else if (cls === 1) {
-              fill = isDark ? "#9cc2b0" : "#648273"; // free-flowing van
-            } else {
-              fill = isDark ? "#b2d6c5" : "#789687"; // free-flowing passenger car
-            }
-            const vl = cls === 2 ? Math.max(minLen * 1.55, 10.2 * sc)
-              : (cls === 1 ? Math.max(minLen * 1.15, 5.6 * sc) : Math.max(minLen, 4.3 * sc));
-            const vw = cls === 2 ? wCapTruck : (cls === 1 ? wCapVan : wCapCar);
-            ctx.fillStyle = fill;
-            if (sc >= 0.75) {
-              ctx.beginPath();
-              ctx.roundRect(-vl / 2, -vw / 2, vl, vw, Math.min(1.4, vw * 0.3));
-              ctx.fill();
-              if (drawOutline) {
-                ctx.strokeStyle = outlineCol;
-                ctx.lineWidth = 0.65;
-                ctx.stroke();
-              }
-            } else {
-              ctx.fillRect(-vl / 2, -vw / 2, vl, vw);
-              if (drawOutline) {
-                ctx.strokeStyle = outlineCol;
-                ctx.lineWidth = 0.55;
-                ctx.strokeRect(-vl / 2, -vw / 2, vl, vw);
-              }
-            }
+            // Passenger Car
+            const cl = Math.max(4.4, 4.5 * sc), cw = Math.max(2.4, 2.2 * sc);
+            ctx.fillStyle = isDark ? "#b8d6c8" : "#9ab0a4";
+            ctx.fillRect(-cl / 2, -cw / 2, cl, cw);
           }
           ctx.restore();
         }
@@ -1127,9 +1097,8 @@
       const chipGrid = new Set();
 
       for (const b of f.buses || []) {
-        const [id, line, x, y, dx, dy, spdRatio, status, restMin, atStop = 0, bLenM = 11.5, latOff = 0] = b;
-        const shift = status === "DRIVING" ? (latOff * exagShift) : 0;
-        const [sx, sy] = toScreen(x + dy * shift, y - dx * shift);
+        const [id, line, x, y, dx, dy, spdRatio, status, restMin, atStop = 0, bLenM = 11.5] = b;
+        const [sx, sy] = toScreen(x, y);
         if (sx < -25 || sx > W + 25 || sy < -25 || sy > H + 25) continue;
 
         const busHitR = state.isTouchInspect ? 24 : 14;
@@ -1148,12 +1117,8 @@
           continue;
         }
 
-        const bl = sc < 0.28
-          ? Math.max(bLenM >= 12 ? 10.5 : (bLenM <= 9 ? 8.0 : 9.5), bLenM * sc)
-          : Math.max(5.2, bLenM * sc);
-        const bw = sc < 0.28
-          ? Math.max(4.2, 2.8 * sc)
-          : Math.max(2.0, Math.min(lanePx * 0.78, 2.65 * sc * Math.min(exag, 1.35)));
+        const bl = Math.max(bLenM >= 14 ? 13.5 : (bLenM <= 9 ? 9.5 : 11), bLenM * sc);
+        const bw = Math.max(5.5, 3.2 * sc);
 
         if (atStop) {
           ctx.beginPath();
@@ -1944,8 +1909,6 @@
       $("runtimeBadge").textContent = "Python ML";
       state.map = await apiFetch("/api/map");
       fitMap();
-      const qZoom = parseFloat(new URLSearchParams(location.search).get("zoom"));
-      if (qZoom > 0.1) { state.camera.scale = qZoom; state.camera.cx = 0; state.camera.cy = -300; }
       await refreshSlots();
       await refreshCredentialsBadge();
 

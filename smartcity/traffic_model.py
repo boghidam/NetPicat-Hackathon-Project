@@ -554,13 +554,6 @@ class TrafficModel:
             y -= dx * 2.3
         return x, y, dx, dy
 
-    def vehicle_lat_offset(self, v: Vehicle) -> float:
-        """Signed lateral offset (m right of road centerline) for UI zoom-aligned lane rendering."""
-        if v.rb_node is not None or (v.kind == "bus" and v.status != "DRIVING"):
-            return 0.0
-        seg = self.net.segments[v.seg]
-        return self.net.lane_lateral_offset(seg, v.lane_visual) + (2.3 if v.in_bus_bay else 0.0)
-
     def density(self, seg_id: int) -> float:
         """Fraction of total lane-length on `seg_id` occupied by vehicles plus standstill gaps, 0..1."""
         gap = self.cfg.min_gap
@@ -1397,26 +1390,17 @@ class TrafficModel:
         n_lanes = self.net.segments[tgt].lanes
         if n_lanes <= 1 or v.kind == "bus":
             return 0
-        # Final destination-building leg prefers curb lane (Bandă 1) if clear
-        final_bldg = v.dest_pos is not None and v.route is not None and v.leg == len(v.route) - 1
-        if final_bldg:
-            tr0 = self.lane_tracks[tgt][0]
-            if not tr0 or (tr0[-1].pos - tr0[-1].length) >= v.length + self.cfg.min_gap + 2.0:
-                return 0
-        # Spread cars naturally across all lanes on 2- and 3-lane boulevards: prefer the least-crowded
-        # lane with ample tail room (tie-breaking on relative lane continuity `pref`).
+        # Prefer matching relative lane if clear; otherwise pick lane with most open tail room
         pref = min(v.lane, n_lanes - 1)
-        need = v.length + self.cfg.min_gap + 2.0
         best_l = pref
-        best_key: tuple[int, int, float, int] = (-1, -999999, -INF, 0)
+        best_room = -INF
         for li in range(n_lanes):
             track = self.lane_tracks[tgt][li]
             room = INF if not track else (track[-1].pos - track[-1].length)
-            has_room = 1 if room >= need else 0
-            # Rank: (1) has entry room, (2) fewest vehicles in lane, (3) most tail room, (4) matches pref
-            key = (has_room, -len(track), min(room, 120.0), 1 if li == pref else 0)
-            if key > best_key:
-                best_key = key
+            if li == pref and room >= v.length + self.cfg.min_gap + 2.0:
+                return pref
+            if room > best_room:
+                best_room = room
                 best_l = li
         return best_l
 
