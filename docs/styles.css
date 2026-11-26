@@ -597,10 +597,10 @@ button, select, input {
 .drawer-inner {
   height: 100%;
   overflow-y: auto;
-  padding: 18px 18px 16px;
+  padding: 14px 16px 14px;
   display: flex;
   flex-direction: column;
-  gap: 11px;
+  gap: 9px;
 }
 
 .drawer-head {
@@ -1300,8 +1300,8 @@ button, select, input {
 }
 
 .realism-bar {
-  margin-top: 9px;
-  padding-top: 9px;
+  margin-top: 0;
+  padding-top: 10px;
   border-top: 1px dashed var(--border);
   display: flex;
   flex-direction: column;
@@ -1515,7 +1515,7 @@ button, select, input {
   }
 
   .workspace.sheet-half .map-controls {
-    bottom: calc(52dvh + 10px);
+    bottom: calc(58dvh + 10px);
   }
 
   .workspace.sheet-full .map-controls {
@@ -1597,7 +1597,7 @@ button, select, input {
   }
 
   .drawer[data-snap="half"] {
-    height: 52dvh;
+    height: 58dvh;
   }
 
   .drawer[data-snap="full"] {
@@ -1853,33 +1853,37 @@ button, select, input {
     color: var(--ink-muted);
   }
 
+  .controls-card {
+    gap: 8px;
+  }
+
   .seg-btn {
-    padding: 10px 10px;
+    padding: 9px 10px;
     font-size: 13px;
   }
 
   .slider-row {
     font-size: 13px;
-    padding: 2px 0;
+    padding: 1px 0;
   }
 
   .slider-row input[type="range"] {
-    height: 28px;
+    height: 26px;
   }
 
   .select-wrap select {
-    height: 42px;
+    height: 40px;
     font-size: 16px;
     padding: 0 12px;
   }
 
   .mini-actions {
     grid-template-columns: repeat(2, 1fr);
-    gap: 8px;
+    gap: 7px;
   }
 
   .mini-btn {
-    height: 40px;
+    height: 38px;
     font-size: 13px;
     border-radius: 10px;
   }
@@ -1889,12 +1893,16 @@ button, select, input {
     font-size: 12.5px;
   }
 
+  .realism-bar {
+    padding-top: 8px;
+  }
+
   .scenario-row {
     gap: 7px;
   }
 
   .scenario-row .mini-btn {
-    height: 40px;
+    height: 38px;
     font-size: 12px;
   }
 
@@ -2165,6 +2173,10 @@ button, select, input {
 
 [data-theme="dark"] .sheet-pill {
   background: rgba(134, 239, 172, 0.28);
+}
+
+[data-theme="dark"] .peek-metric strong {
+  color: #4ade80;
 }
 
 [data-theme="dark"] .peek-ctrl-btn,

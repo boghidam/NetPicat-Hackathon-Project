@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="styles.css?v=2" />
 </head>
 <body>
   <!-- TOP NAVIGATION BAR (Bottle Green) -->
@@ -283,11 +283,6 @@
           </div>
 
           <div class="realism-bar">
-            <div class="weather-seg" role="group" aria-label="Weather condition">
-              <button id="btnWeatherClear" class="w-btn active" data-weather="clear" title="Clear dry roads">Clear</button>
-              <button id="btnWeatherRain" class="w-btn" data-weather="rain" title="Rain: -15% speed, +25% headway, +18% car demand">Rain</button>
-              <button id="btnWeatherSnow" class="w-btn" data-weather="snow" title="Winter snow: -30% speed, +55% braking distance">Snow</button>
-            </div>
             <div class="scenario-row">
               <button id="btnDayCycle" class="mini-btn" title="Toggle 24h Iași rush-hour clock (07:30 AM → evening)">Day Cycle</button>
               <button id="btnFriction" class="mini-btn" title="Toggle double-parked delivery stops ('5 min pe avarii') on multi-lane roads">Friction</button>
@@ -371,8 +366,8 @@
     </div>
   </div>
 
-  <script src="demo_config.js"></script>
-  <script src="standalone_sim.js"></script>
-  <script src="app.js"></script>
+  <script src="demo_config.js?v=2"></script>
+  <script src="standalone_sim.js?v=2"></script>
+  <script src="app.js?v=2"></script>
 </body>
 </html>

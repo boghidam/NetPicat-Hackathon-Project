@@ -96,7 +96,7 @@
     // Smoothly keep the map center framed in the open viewport above the bottom sheet
     if (!skipReframe && isMobile() && state.map && prev !== valid) {
       const vh = window.innerHeight || 700;
-      const occ = (s) => (s === "peek" ? 68 : vh * 0.52);
+      const occ = (s) => (s === "peek" ? 68 : vh * 0.58);
       const deltaPx = (occ(valid) - occ(prev)) * 0.5;
       if (Math.abs(deltaPx) > 1 && state.camera.scale > 0) {
         state.camera.cy -= deltaPx / state.camera.scale;
@@ -120,7 +120,7 @@
     const mapH = Math.max(1, y1 - y0);
 
     if (isMobile()) {
-      const sheetOcc = state.mobileSnap === "half" ? rect.height * 0.52 : 80;
+      const sheetOcc = state.mobileSnap === "half" ? rect.height * 0.58 : 80;
       const topOcc = 44;
       const availH = Math.max(180, rect.height - sheetOcc - topOcc);
       const sx = (rect.width * 0.93) / mapW;
@@ -360,9 +360,9 @@
 
     // Realism controls sync (Weather, Day Cycle, Urban Friction)
     const curW = f.weather || "clear";
-    $("btnWeatherClear").classList.toggle("active", curW === "clear");
-    $("btnWeatherRain").classList.toggle("active", curW === "rain");
-    $("btnWeatherSnow").classList.toggle("active", curW === "snow");
+    if ($("btnWeatherClear")) $("btnWeatherClear").classList.toggle("active", curW === "clear");
+    if ($("btnWeatherRain")) $("btnWeatherRain").classList.toggle("active", curW === "rain");
+    if ($("btnWeatherSnow")) $("btnWeatherSnow").classList.toggle("active", curW === "snow");
     $("btnDayCycle").classList.toggle("active", !!f.day_cycle);
     $("btnDayCycle").textContent = f.day_cycle && f.day_time ? `Clock ${f.day_time}` : "Day Cycle";
     $("btnFriction").classList.toggle("active", !!f.urban_friction);
@@ -1589,7 +1589,7 @@
     const snapHeights = () => {
       const vh = window.innerHeight || 700;
       const peekH = 68;
-      const halfH = Math.round(vh * 0.52);
+      const halfH = Math.round(vh * 0.58);
       const fullH = Math.min(Math.round(vh * 0.84), vh - 58);
       return { peek: peekH, half: halfH, full: fullH };
     };
@@ -1875,7 +1875,8 @@
 
     // Realism & Scenarios Controls
     ["btnWeatherClear", "btnWeatherRain", "btnWeatherSnow"].forEach((id) => {
-      $(id).onclick = () => sendCmd({ cmd: "set_weather", weather: $(id).dataset.weather });
+      const btn = $(id);
+      if (btn) btn.onclick = () => sendCmd({ cmd: "set_weather", weather: btn.dataset.weather });
     });
     $("btnDayCycle").onclick = () => sendCmd({ cmd: "set_day_cycle", enabled: !(state.frame && state.frame.day_cycle) });
     $("btnFriction").onclick = () => sendCmd({ cmd: "set_urban_friction", enabled: !(state.frame && state.frame.urban_friction) });
